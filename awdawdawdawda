@@ -1,5 +1,5 @@
---[[ NTMT HUB - Grow a Garden 2 v7.0 | UI: redz-V5 | made by nguoitinhmuathu ]]
-print("[NTMT HUB] BOOT v7.0")
+--[[ NTMT HUB - Grow a Garden 2 v7.1 | UI: redz-V5 | made by nguoitinhmuathu ]]
+print("[NTMT HUB] BOOT v7.1")
 
 pcall(function()
     if delfile and isfile then
@@ -845,7 +845,7 @@ UI_THEMES = {
     Yellow = { accent = "#eab308", bg = "#1a160a", btn = "#3d3415", text = "#fffbe6", toggle = "#eab308" },
     Purple = { accent = "#a855f7", bg = "#140a1a", btn = "#2a153d", text = "#f3e6ff", toggle = "#a855f7" },
 }
-COOLDOWN = { Harvest = 0.06, Plant = 0.02, Buy = 0.02, Expand = 8, Sell = 0.5, Shovel = 0.05, Gear = 0.5, Pet = 0.01, Mail = 2, Water = 0.35 }
+COOLDOWN = { Harvest = 0.01, Plant = 0.02, Buy = 0.02, Expand = 8, Sell = 0.5, Shovel = 0.05, Gear = 0.5, Pet = 0.01, Mail = 2, Water = 0.35 }
 PLANT_MIN_DIST = 3
 PLANT_GRID_STEP = 6
 PLANT_GRID_MIN_DIST = 6
@@ -864,14 +864,19 @@ NEAR_PLAYER_DIST = 45
 PLOT_EDGE_MARGIN = 65
 SPRINKLER_MIN_DIST = 8
 STEAL_BATCH = 3
-STEAL_FRUIT_ATTEMPTS = 24
+STEAL_FRUIT_ATTEMPTS = 10
 STEAL_ATTEMPT_WAIT = 0
-STEAL_TARGET_CACHE_TTL = 0.35
-STEAL_SESSION_GAP = 0.025
+STEAL_TARGET_CACHE_TTL = 0.6
+STEAL_SESSION_GAP = 0.03
+stealPlotRotation = 0
+lastHarvestBestScan = 0
+cachedHarvestBest = nil
+HARVEST_BEST_CACHE = 0.05
+DROP_SCAN_INTERVAL = 1.0
+DROP_COLLECT_RADIUS = math.huge
+DROP_NAME_KEYWORDS = { "gold", "rainbow", "mega", "drop", "seed", "acorn", "pack", "item" }
 PLANT_BATCH = 6
 KAITUN_PLANT_BATCH = 16
-DROP_SCAN_INTERVAL = 2.5
-DROP_COLLECT_RADIUS = 500
 FRUIT_ESP_INTERVAL = 2.5
 dropWatchReady = false
 dropPromptSet = {}
@@ -2132,7 +2137,7 @@ collectingMutation, petFindBusy = false, false
 lastPlant, lastExpand, lastShovel, lastGear, lastPet, lastSellTry, lastMailTime = 0, 0, 0, 0, 0, 0, 0
 isSendingMail = false
 firedSet = {}
-HARVEST_BATCH = 1
+HARVEST_BATCH = 10
 lastFiredCleanup = 0
 lastBestScan = 0
 cachedBestHarvest = nil
@@ -3770,16 +3775,26 @@ end
 
 function tryHarvestBestTick()
     if not genv.ftgs_AutoHarvestBest then return end
-    refreshOwnerPlot()
-    if not OwnerPlot then return end
-    local bestEntity, bestVal
-    for _, entity in collectPhysicalHarvestables() do
-        local val = calculateStealValue(entity) or 0
-        if not bestEntity or val > bestVal then
-            bestEntity, bestVal = entity, val
+    local now = os.clock()
+    if not cachedHarvestBest or now - lastHarvestBestScan > HARVEST_BEST_CACHE then
+        lastHarvestBestScan = now
+        cachedHarvestBest = nil
+        refreshOwnerPlot()
+        if not OwnerPlot then return end
+        local bestEntity, bestVal
+        for _, entity in collectPhysicalHarvestables() do
+            local val = calculateStealValue(entity) or 0
+            if not bestEntity or val > bestVal then
+                bestEntity, bestVal = entity, val
+            end
         end
+        cachedHarvestBest = bestEntity
     end
-    if not bestEntity then return end
+    local bestEntity = cachedHarvestBest
+    if not bestEntity or not bestEntity.Parent then
+        cachedHarvestBest = nil
+        return
+    end
     local plantId = bestEntity:GetAttribute("PlantId")
     local fruitId = bestEntity:GetAttribute("FruitId") or ""
     if not plantId then
@@ -3885,10 +3900,10 @@ end
 
 function cleanupFiredSetIfNeeded(now)
     now = now or os.clock()
-    if now - lastFiredCleanup < 5 then return end
+    if now - lastFiredCleanup < 0.4 then return end
     lastFiredCleanup = now
     for key, time in pairs(firedSet) do
-        if now - time > 30 then firedSet[key] = nil end
+        if now - time > 0.8 then firedSet[key] = nil end
     end
 end
 
@@ -4414,21 +4429,30 @@ function stealFruit(fruit, ownerUserId, sessionId)
     if isStealComplete(fruit, fruitCountBefore) then
         StolenFruits[#StolenFruits + 1] = { name = fruit.Name .. " (" .. tostring(calculateStealValue(fruit)) .. ")", time = os.time() }
         markStealConfigDirty()
-        cachedStealTargets = nil
-        lastStealTargetScan = 0
         return true
     end
     return false
 end
 
+function pickStealPlotTarget(targets)
+    refreshOwnerPlot()
+    if #targets == 0 then return nil end
+    local filtered = {}
+    for _, t in ipairs(targets) do
+        if OwnerPlot and t.plot == OwnerPlot then continue end
+        local owner = t.owner
+        if owner and isOwnerInPlot(t.plot, owner) then continue end
+        if owner and not plotUnlocked(owner) then continue end
+        filtered[#filtered + 1] = t
+    end
+    if #filtered == 0 then return nil end
+    local idx = ((stealPlotRotation - 1) % #filtered) + 1
+    return filtered[idx], idx, #filtered
+end
+
 function tryAutoSteal()
     if not autoStealOn() or stealBusy or isInventoryFull() or not isNightTime() then return end
     initMapFolders()
-    cachedStealTargets = nil
-    lastStealTargetScan = 0
-    safeNetCall(Net.Garden and Net.Garden.RequestGardens)
-    if #collectAllStealTargets() == 0 then return end
-
     stealBusy = true
     local sessionId = stealSessionId
     task.spawn(function()
@@ -4439,75 +4463,48 @@ function tryAutoSteal()
 
         movementBypass = true
         gardenActionLock = true
-        local didStealAny = false
 
-        while autoStealOn() and sessionId == stealSessionId and not isInventoryFull() and isNightTime() do
-            local atHome = isNearOwnPlotCenter(28)
-            cachedStealTargets = nil
-            lastStealTargetScan = 0
-            local targets = collectAllStealTargets()
-            if #targets == 0 then break end
+        safeNetCall(Net.Garden and Net.Garden.RequestGardens)
+        local targets = collectAllStealTargets()
+        local plotEntry, pickedIdx, totalPlots = pickStealPlotTarget(targets)
+        if not plotEntry then
+            finishStealSession(sessionId, false)
+            return
+        end
 
-            local plotEntry = nil
-            for _, t in ipairs(targets) do
-                if atHome and lastStealPlot == t.plot then continue end
-                local owner = t.owner
-                if owner and isOwnerInPlot(t.plot, owner) then continue end
-                if owner and not plotUnlocked(owner) then continue end
-                plotEntry = t
-                break
-            end
-            if not plotEntry and atHome and lastStealPlot then
-                lastStealPlot = nil
-                for _, t in ipairs(targets) do
-                    local owner = t.owner
-                    if owner and isOwnerInPlot(t.plot, owner) then continue end
-                    if owner and not plotUnlocked(owner) then continue end
-                    plotEntry = t
-                    break
-                end
-            end
-            if not plotEntry then break end
+        local plot = plotEntry.plot
+        local owner = plotEntry.owner
+        local uid = owner and owner.UserId or plotEntry.ownerUserId
+        local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH)
+        local batchStolen = 0
 
-            local plot = plotEntry.plot
-            local owner = plotEntry.owner
-            local uid = owner and owner.UserId or plotEntry.ownerUserId
-            local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH)
-            if #fruits == 0 then
-                lastStealPlot = plot
-                if atHome then
-                    task.wait(STEAL_SESSION_GAP)
-                    continue
-                end
-                break
-            end
-
-            local batchStolen = 0
-            for _, fruit in ipairs(fruits) do
-                if batchStolen >= STEAL_BATCH then break end
-                if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
-                if isInventoryFull() then break end
-                if owner and isOwnerInPlot(plot, owner) then break end
-                if stealFruit(fruit, uid, sessionId) then
-                    batchStolen += 1
-                    didStealAny = true
-                end
-            end
-
-            if batchStolen <= 0 then break end
-
-            lastStealPlot = plot
-            teleportToGardenCenter()
-            cachedStealTargets = nil
-            lastStealTargetScan = 0
-            task.wait(STEAL_SESSION_GAP)
-
-            if not isNearOwnPlotCenter(32) then
-                task.wait(0.06)
+        for _, fruit in ipairs(fruits) do
+            if batchStolen >= STEAL_BATCH then break end
+            if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
+            if isInventoryFull() then break end
+            if owner and isOwnerInPlot(plot, owner) then break end
+            if stealFruit(fruit, uid, sessionId) then
+                batchStolen += 1
             end
         end
 
-        finishStealSession(sessionId, didStealAny)
+        if batchStolen > 0 or not isNearOwnPlotCenter(36) then
+            refreshOwnerPlot()
+            teleportToGardenCenter()
+            local hrp = getRoot()
+            if hrp and savedPlotCenter then
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.CFrame = CFrame.new(savedPlotCenter + Vector3.new(0, 3, 0))
+            end
+            lastStealReturn = os.clock()
+        end
+
+        if totalPlots and totalPlots > 0 then
+            stealPlotRotation = (pickedIdx % totalPlots) + 1
+        end
+        cachedStealTargets = nil
+        lastStealTargetScan = 0
+        finishStealSession(sessionId, false)
     end)
 end
 
@@ -5805,47 +5802,30 @@ function collectPlotFruits(plot)
 end
 
 function scanFruitEspTargets()
-    local allFruits = {}
-    local perGardenBest = {}
-    if not Gardens then return {} end
-    for _, plot in Gardens:GetChildren() do
+    local out = {}
+    local seen = {}
+    if not Gardens then return out end
+
+    refreshOwnerPlot()
+    local plots = Gardens:GetChildren()
+    table.sort(plots, function(a, b)
+        if OwnerPlot and a == OwnerPlot then return true end
+        if OwnerPlot and b == OwnerPlot then return false end
+        return getPlotEspLabel(a) < getPlotEspLabel(b)
+    end)
+
+    for _, plot in plots do
         local plotFruits = collectPlotFruits(plot)
         if #plotFruits == 0 then continue end
         table.sort(plotFruits, function(a, b) return (a.value or 0) > (b.value or 0) end)
-        local maxVal = plotFruits[1].value or 0
-        local bestInGarden = {}
-        for _, entry in ipairs(plotFruits) do
-            allFruits[#allFruits + 1] = entry
-            if (entry.value or 0) >= maxVal - 0.01 then
-                bestInGarden[#bestInGarden + 1] = entry
-            else
-                break
-            end
-        end
-        if #bestInGarden > 0 then perGardenBest[plot] = bestInGarden end
-    end
-    table.sort(allFruits, function(a, b) return (a.value or 0) > (b.value or 0) end)
-    local out = {}
-    local seen = {}
-    for i = 1, math.min(10, #allFruits) do
-        local entry = allFruits[i]
-        if not seen[entry.fruit] then
-            seen[entry.fruit] = true
-            out[#out + 1] = {
-                entry = entry,
-                label = "#" .. i .. " " .. tostring(math.floor(entry.value or 0)),
-            }
-        end
-    end
-    for _, plot in Gardens:GetChildren() do
-        local bestList = perGardenBest[plot]
-        if not bestList then continue end
-        for _, entry in ipairs(bestList) do
+        local gardenLabel = (OwnerPlot and plot == OwnerPlot) and "My Garden" or getPlotEspLabel(plot)
+        for i = 1, math.min(10, #plotFruits) do
+            local entry = plotFruits[i]
             if seen[entry.fruit] then continue end
             seen[entry.fruit] = true
             out[#out + 1] = {
                 entry = entry,
-                label = entry.plot .. " MAX " .. tostring(math.floor(entry.value or 0)),
+                label = gardenLabel .. " #" .. i .. " " .. tostring(math.floor(entry.value or 0)),
             }
         end
     end
@@ -6156,7 +6136,34 @@ function isCollectDropPrompt(prompt)
     if not prompt or not prompt:IsA("ProximityPrompt") then return false end
     local action = (prompt.ActionText or ""):lower()
     local obj = (prompt.ObjectText or ""):lower()
-    return action:find("pick", 1, true) or action:find("collect", 1, true) or action:find("grab", 1, true) or obj:find("drop", 1, true)
+    local keywords = { "pick", "collect", "grab", "take", "nhặt", "nhac", "drop", "equip", "use", "claim", "get" }
+    for _, kw in keywords do
+        if action:find(kw, 1, true) or obj:find(kw, 1, true) then return true end
+    end
+    return false
+end
+
+function isInsideGardenPlant(inst)
+    if not inst or not Gardens then return false end
+    if not inst:IsDescendantOf(Gardens) then return false end
+    local plants = inst:FindFirstAncestor("Plants")
+    if not plants then return false end
+    local model = inst:IsA("ProximityPrompt") and inst:FindFirstAncestorWhichIsA("Model") or inst
+    if model and (model:GetAttribute("MaxAge") or model:GetAttribute("PlantId")) then return true end
+    return false
+end
+
+function isGardenPlantPrompt(prompt)
+    return isInsideGardenPlant(prompt)
+end
+
+function dropNameMatches(inst)
+    if not inst then return false end
+    local name = string.lower(inst.Name)
+    for _, kw in DROP_NAME_KEYWORDS do
+        if name:find(kw, 1, true) then return true end
+    end
+    return false
 end
 
 function getDropPromptPart(prompt)
@@ -6166,7 +6173,12 @@ function getDropPromptPart(prompt)
 end
 
 function addDropPromptEntry(prompt)
-    if dropPromptSet[prompt] or not isCollectDropPrompt(prompt) then return end
+    if dropPromptSet[prompt] then return end
+    if isGardenPlantPrompt(prompt) then return end
+    if not isCollectDropPrompt(prompt) then
+        local host = prompt.Parent
+        if not host or not dropNameMatches(host) then return end
+    end
     local part = getDropPromptPart(prompt)
     if not part then return end
     dropPromptSet[prompt] = true
@@ -6177,16 +6189,19 @@ function addDropPromptEntry(prompt)
 end
 
 function registerDropInstance(inst)
-    if not inst then return end
+    if not inst or not inst.Parent then return end
+    if isInsideGardenPlant(inst) then return end
     if inst:IsA("ProximityPrompt") then
         addDropPromptEntry(inst)
         return
     end
-    local prompt = inst:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if prompt then addDropPromptEntry(prompt) end
+    if dropNameMatches(inst) or inst:GetAttribute("RainbowSeed") or inst:GetAttribute("GoldSeed") or inst:GetAttribute("MegaSeed") then
+        local prompt = inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if prompt then addDropPromptEntry(prompt) end
+    end
 end
 
-function hookDropContainer(container)
+function hookDropContainer(container, deep)
     if not container or container:GetAttribute("NTMT_DropHooked") then return end
     container:SetAttribute("NTMT_DropHooked", true)
     container.DescendantAdded:Connect(function(desc)
@@ -6195,8 +6210,14 @@ function hookDropContainer(container)
     container.ChildAdded:Connect(function(ch)
         task.defer(function() registerDropInstance(ch) end)
     end)
-    for _, ch in container:GetChildren() do
-        task.defer(function() registerDropInstance(ch) end)
+    if deep then
+        for _, desc in container:GetDescendants() do
+            if desc:IsA("ProximityPrompt") then addDropPromptEntry(desc) end
+        end
+    else
+        for _, ch in container:GetChildren() do
+            task.defer(function() registerDropInstance(ch) end)
+        end
     end
 end
 
@@ -6204,41 +6225,54 @@ function setupDropWatchers()
     initMapFolders()
     local first = not dropWatchReady
     dropWatchReady = true
-    local dropNames = { "ItemDrops", "Drops", "Collectibles", "SeedPackSpawns" }
+    local dropNames = { "ItemDrops", "Drops", "Collectibles", "SeedPackSpawns", "DroppedItems", "Items", "Pickups", "Loot", "WorldDrops" }
     local map = Services.Workspace:FindFirstChild("Map")
     if map then
         for _, name in dropNames do
             local folder = map:FindFirstChild(name)
-            if folder then hookDropContainer(folder) end
+            if folder then hookDropContainer(folder, true) end
         end
         if first then
             map.ChildAdded:Connect(function(ch)
                 for _, name in dropNames do
-                    if ch.Name == name then hookDropContainer(ch) end
+                    if ch.Name == name then hookDropContainer(ch, true) end
                 end
+            end)
+            map.DescendantAdded:Connect(function(desc)
+                if desc:IsA("ProximityPrompt") then task.defer(function() addDropPromptEntry(desc) end) end
             end)
         end
     end
-    for _, name in { "Drops", "ItemDrops" } do
+    for _, name in { "Drops", "ItemDrops", "DroppedItems" } do
         local folder = Services.Workspace:FindFirstChild(name)
-        if folder then hookDropContainer(folder) end
+        if folder then hookDropContainer(folder, true) end
     end
-    if Gardens then hookDropContainer(Gardens) end
+    if Gardens then hookDropContainer(Gardens, false) end
     refreshOwnerPlot()
-    if OwnerPlot then hookDropContainer(OwnerPlot) end
-    if SeedPackSpawns then hookDropContainer(SeedPackSpawns) end
-    if first then task.defer(function() rebuildDropPromptCache(true) end) end
+    if OwnerPlot then hookDropContainer(OwnerPlot, false) end
+    if SeedPackSpawns then hookDropContainer(SeedPackSpawns, true) end
+    if first then
+        Services.Workspace.DescendantAdded:Connect(function(desc)
+            if not autoCollectDropsOn() then return end
+            if desc:IsA("ProximityPrompt") then
+                task.defer(function() addDropPromptEntry(desc) end)
+            end
+        end)
+        task.defer(function() rebuildDropPromptCache(true) end)
+    end
 end
 
-function scanDropPromptsInto(container, out, hrpPos)
+function scanDropPromptsInto(container, out)
     if not container then return end
     for _, item in container:GetDescendants() do
         if not item:IsA("ProximityPrompt") then continue end
-        if not isCollectDropPrompt(item) then continue end
+        if isGardenPlantPrompt(item) then continue end
+        if not isCollectDropPrompt(item) then
+            if not dropNameMatches(item.Parent) then continue end
+        end
         local part = getDropPromptPart(item)
         if not part then continue end
-        if hrpPos and (part.Position - hrpPos).Magnitude > DROP_COLLECT_RADIUS then continue end
-        out[#out + 1] = { prompt = item, part = part, dist = hrpPos and (part.Position - hrpPos).Magnitude or 0 }
+        out[#out + 1] = { prompt = item, part = part, dist = 0 }
         dropPromptSet[item] = true
     end
 end
@@ -6250,19 +6284,23 @@ function rebuildDropPromptCache(fullScan)
     local roots = {}
     local map = Services.Workspace:FindFirstChild("Map")
     if map then
-        for _, name in { "ItemDrops", "Drops", "Collectibles", "SeedPackSpawns" } do
+        for _, name in { "ItemDrops", "Drops", "Collectibles", "SeedPackSpawns", "DroppedItems", "Items", "Pickups", "Loot", "WorldDrops" } do
             local folder = map:FindFirstChild(name)
             if folder then roots[#roots + 1] = folder end
         end
     end
-    for _, name in { "Drops", "ItemDrops" } do
+    for _, name in { "Drops", "ItemDrops", "DroppedItems" } do
         local folder = Services.Workspace:FindFirstChild(name)
         if folder then roots[#roots + 1] = folder end
     end
     if SeedPackSpawns then roots[#roots + 1] = SeedPackSpawns end
-    if Gardens then roots[#roots + 1] = Gardens end
-    if OwnerPlot then roots[#roots + 1] = OwnerPlot end
-    for _, root in roots do scanDropPromptsInto(root, dropPromptCache, nil) end
+    for _, root in roots do scanDropPromptsInto(root, dropPromptCache) end
+    if #dropPromptCache == 0 and map then
+        for _, ch in map:GetChildren() do
+            if ch.Name == "Gardens" then continue end
+            scanDropPromptsInto(ch, dropPromptCache)
+        end
+    end
     table.sort(dropPromptCache, function(a, b) return a.dist < b.dist end)
     lastDropScan = os.clock()
 end
@@ -6296,16 +6334,17 @@ end
 function tryCollectDrops()
     if not autoCollectDropsOn() or collectingMutation or isCatchingPet or dropsBusy then return end
     local nearest = findNearestDropPrompt()
-    if not nearest then return end
+    if not nearest or not nearest.prompt or not nearest.prompt.Parent then return end
     dropsBusy = true
     movementBypass = true
     gardenActionLock = true
     tpInstant(nearest.part.Position)
-    for _ = 1, 10 do
+    for _ = 1, 12 do
         if not autoCollectDropsOn() then break end
+        if not nearest.prompt or not nearest.prompt.Parent then break end
         if nearest.part and nearest.part.Parent then tpInstant(nearest.part.Position) end
         fireProximityPromptFast(nearest.prompt)
-        task.wait(0.015)
+        task.wait(0.012)
     end
     movementBypass = false
     gardenActionLock = false
@@ -6758,7 +6797,7 @@ SettingsTab:Toggle({ Title = "Anti Hit", Desc = "no knockback if someone hit you
 end })
 SettingsTab:Section({ Title = "Visual" })
 SettingsTab:Toggle({ Title = "Fullbright", Desc = "night vision", Default = genv.ftgs_Fullbright or false, Callback = function(s) setFullbright(s) end })
-SettingsTab:Toggle({ Title = "Fruit ESP", Desc = "Top 10 server + max value per garden", Default = genv.ftgs_FruitESP == true, Callback = function(s)
+SettingsTab:Toggle({ Title = "Fruit ESP", Desc = "Top 10 per garden (My Garden first)", Default = genv.ftgs_FruitESP == true, Callback = function(s)
     genv.ftgs_FruitESP = s
     saveConfig()
     if not s then clearFruitEsp() end
@@ -6925,7 +6964,7 @@ hubLoop(function()
         if autoStealOn() and not stealBusy and isNightTime() then safeLoop(tryAutoSteal) end
         if autoStealOn() and not isNightTime() and not stealDawnReturnDone then handleStealDawnReturn() end
         flushStealConfigIfDue()
-        task.wait(stealBusy and 0.02 or 0.05)
+        task.wait(stealBusy and 0.02 or STEAL_SESSION_GAP)
     end
 end)
 
@@ -6948,7 +6987,7 @@ hubLoop(function()
     setupDropWatchers()
     while true do
         if autoCollectMutationOn() or autoCollectDropsOn() then safeLoop(tryAutoCollectTick) end
-        task.wait(collectingMutation and 0.12 or 0.1)
+        task.wait(collectingMutation and 0.08 or 0.05)
     end
 end)
 
@@ -7120,7 +7159,7 @@ task.spawn(function()
     end
 end)
 
-print("[NTMT HUB v7.0] Loaded | " .. Executor)
+print("[NTMT HUB v7.1] Loaded | " .. Executor)
 
 pcall(function()
     game:GetService("StarterGui"):SetCore("SendNotification", {
