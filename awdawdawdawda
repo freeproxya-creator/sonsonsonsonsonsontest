@@ -1,5 +1,5 @@
---[[ NTMT HUB - Grow a Garden 2 v1 | UI: redz-V5 | made by nguoitinhmuathu ]]
-print("[NTMT HUB] BOOT v1")
+--[[ NTMT HUB - Grow a Garden 2 v7.0 | UI: redz-V5 | made by nguoitinhmuathu ]]
+print("[NTMT HUB] BOOT v7.0")
 
 pcall(function()
     if delfile and isfile then
@@ -845,7 +845,7 @@ UI_THEMES = {
     Yellow = { accent = "#eab308", bg = "#1a160a", btn = "#3d3415", text = "#fffbe6", toggle = "#eab308" },
     Purple = { accent = "#a855f7", bg = "#140a1a", btn = "#2a153d", text = "#f3e6ff", toggle = "#a855f7" },
 }
-COOLDOWN = { Harvest = 0.01, Plant = 0.01, Buy = 0.01, Expand = 8, Sell = 0.5, Shovel = 0.05, Gear = 0.5, Pet = 0.01, Mail = 2, Water = 0.35 }
+COOLDOWN = { Harvest = 0.06, Plant = 0.02, Buy = 0.02, Expand = 8, Sell = 0.5, Shovel = 0.05, Gear = 0.5, Pet = 0.01, Mail = 2, Water = 0.35 }
 PLANT_MIN_DIST = 3
 PLANT_GRID_STEP = 6
 PLANT_GRID_MIN_DIST = 6
@@ -866,12 +866,17 @@ SPRINKLER_MIN_DIST = 8
 STEAL_BATCH = 3
 STEAL_FRUIT_ATTEMPTS = 24
 STEAL_ATTEMPT_WAIT = 0
-STEAL_TARGET_CACHE_TTL = 0.08
+STEAL_TARGET_CACHE_TTL = 0.35
 STEAL_SESSION_GAP = 0.025
 PLANT_BATCH = 6
 KAITUN_PLANT_BATCH = 16
-DROP_SCAN_INTERVAL = 0.75
+DROP_SCAN_INTERVAL = 2.5
 DROP_COLLECT_RADIUS = 500
+FRUIT_ESP_INTERVAL = 2.5
+dropWatchReady = false
+dropPromptSet = {}
+fruitEspPool = {}
+lastStealPlot = nil
 lastMovementBypassAt = 0
 MOVEMENT_BYPASS_INTERVAL = 0.04
 dropPromptCache = {}
@@ -959,7 +964,7 @@ function autoCollectDropsOn() return ftgsOn("ftgs_AutoCollectDrops") or ftgsOn("
 autoClickSpeed = 0.04
 hubKeyUnlocked, hubTabsBuilt, hubKeyDraft, hubKeyInputEl = false, false, "", nil
 weatherPredictPara, weatherLivePara = nil, nil
-FAVORITE_TICK = 0.01
+FAVORITE_TICK = 0.35
 visualMoneyBackup = nil
 MOON_WEATHER_CLEN = 600
 MOON_WEATHER_START_CYCLE = 2970230
@@ -2404,6 +2409,8 @@ function initFavoriteRemotes()
         end
     end
     local paths = {
+        "Inventory.ToggleCropFavorite",
+        "Inventory.SetCropFavorite",
         "Inventory.ToggleHarvestedFruitFavorite",
         "Inventory.SetHarvestedFruitFavorite",
         "Inventory.ToggleFavorite",
@@ -2417,6 +2424,8 @@ function initFavoriteRemotes()
         "UI.ToggleFavorite",
         "Favorites.ToggleHarvestedFruit",
         "Favorites.SetHarvestedFruitFavorite",
+        "Favorites.ToggleCrop",
+        "Favorites.SetCropFavorite",
         "Favorites.Toggle",
         "Favorites.SetFavorite",
     }
@@ -2440,9 +2449,34 @@ function initFavoriteRemotes()
     return nil
 end
 
+function getCropInventoryBuckets()
+    local buckets = {}
+    if not PlayerReplica or not PlayerReplica.Data or not PlayerReplica.Data.Inventory then return buckets end
+    local inv = PlayerReplica.Data.Inventory
+    if type(inv.Crops) == "table" then buckets[#buckets + 1] = { category = "Crops", bucket = inv.Crops } end
+    if type(inv.HarvestedFruits) == "table" then buckets[#buckets + 1] = { category = "HarvestedFruits", bucket = inv.HarvestedFruits } end
+    return buckets
+end
+
 function getHarvestedFruitBucket()
     if not PlayerReplica or not PlayerReplica.Data or not PlayerReplica.Data.Inventory then return nil end
-    return PlayerReplica.Data.Inventory.HarvestedFruits
+    return PlayerReplica.Data.Inventory.Crops or PlayerReplica.Data.Inventory.HarvestedFruits
+end
+
+function iterCropInventoryEntries()
+    local out = {}
+    for _, info in ipairs(getCropInventoryBuckets()) do
+        for fruitId, entry in pairs(info.bucket) do
+            if type(entry) == "table" then
+                out[#out + 1] = {
+                    id = getHarvestedFruitId(fruitId, entry),
+                    entry = entry,
+                    category = info.category,
+                }
+            end
+        end
+    end
+    return out
 end
 
 function getHarvestedFruitName(entry)
@@ -2483,25 +2517,31 @@ function scanNetFavoriteRemotes()
     return found
 end
 
-function fireFavoriteRemote(remote, fruitId, wantFavorite)
+function fireFavoriteRemote(remote, fruitId, wantFavorite, category)
     if not remote or fruitId == nil then return false end
+    category = category or "Crops"
     local idStr = tostring(fruitId)
-    local tries = {
-        function() return safeNetCall(remote, "HarvestedFruits", fruitId, wantFavorite) end,
-        function() return safeNetCall(remote, "HarvestedFruits", idStr, wantFavorite) end,
-        function() return safeNetCall(remote, fruitId, "HarvestedFruits", wantFavorite) end,
-        function() return safeNetCall(remote, fruitId, wantFavorite) end,
-        function() return safeNetCall(remote, idStr, wantFavorite) end,
-        function() return safeNetCall(remote, wantFavorite, fruitId) end,
-        function() return safeNetCall(remote, "HarvestedFruits", fruitId) end,
-        function() return safeNetCall(remote, fruitId) end,
-        function() return safeNetCall(remote, idStr) end,
-        function() return safeNetCall(remote, "HarvestedFruits", fruitId, wantFavorite and true or false) end,
-        function() return safeNetCall(remote, { Category = "HarvestedFruits", ItemKey = fruitId, Favorite = wantFavorite }) end,
-        function() return safeNetCall(remote, { Category = "HarvestedFruits", Id = fruitId, Favorite = wantFavorite }) end,
-        function() return safeNetCall(remote, "HarvestedFruits", { Id = fruitId, Favorite = wantFavorite }) end,
-        function() return safeNetCall(remote, { ItemType = "HarvestedFruits", Id = fruitId, State = wantFavorite }) end,
-    }
+    local categories = { category }
+    if category ~= "Crops" then categories[#categories + 1] = "Crops" end
+    if category ~= "HarvestedFruits" then categories[#categories + 1] = "HarvestedFruits" end
+    local tries = {}
+    local function add(fn) tries[#tries + 1] = fn end
+    for _, cat in ipairs(categories) do
+        add(function() return safeNetCall(remote, cat, fruitId, wantFavorite) end)
+        add(function() return safeNetCall(remote, cat, idStr, wantFavorite) end)
+        add(function() return safeNetCall(remote, fruitId, cat, wantFavorite) end)
+        add(function() return safeNetCall(remote, cat, fruitId) end)
+        add(function() return safeNetCall(remote, cat, idStr) end)
+        add(function() return safeNetCall(remote, fruitId, cat) end)
+        add(function() return safeNetCall(remote, cat, fruitId, wantFavorite and true or false) end)
+        add(function() return safeNetCall(remote, { Category = cat, ItemKey = fruitId, Favorite = wantFavorite }) end)
+        add(function() return safeNetCall(remote, { Category = cat, Id = fruitId, Favorite = wantFavorite }) end)
+        add(function() return safeNetCall(remote, cat, { Id = fruitId, Favorite = wantFavorite }) end)
+        add(function() return safeNetCall(remote, { ItemType = cat, Id = fruitId, State = wantFavorite }) end)
+    end
+    add(function() return safeNetCall(remote, fruitId, wantFavorite) end)
+    add(function() return safeNetCall(remote, idStr, wantFavorite) end)
+    add(function() return safeNetCall(remote, wantFavorite, fruitId) end)
     for _, fn in tries do
         if fn() then return true end
     end
@@ -2516,24 +2556,24 @@ function markFruitFavoriteState(entry, wantFavorite)
     entry.Starred = wantFavorite
 end
 
-function setFruitFavoriteById(fruitId, entry, wantFavorite)
+function setFruitFavoriteById(fruitId, entry, wantFavorite, category)
     initFavoriteRemotes()
     if fruitId == nil then return false end
+    category = category or "Crops"
     if entry and isFruitFavorited(entry) == wantFavorite then return false end
-    if favoriteRemote and fireFavoriteRemote(favoriteRemote, fruitId, wantFavorite) then
+    if favoriteRemote and fireFavoriteRemote(favoriteRemote, fruitId, wantFavorite, category) then
         markFruitFavoriteState(entry, wantFavorite)
         return true
     end
     for _, info in scanNetFavoriteRemotes() do
-        if fireFavoriteRemote(info.remote, fruitId, wantFavorite) then
+        if fireFavoriteRemote(info.remote, fruitId, wantFavorite, category) then
             favoriteRemote = info.remote
             favoriteRemotePath = info.path
             markFruitFavoriteState(entry, wantFavorite)
             return true
         end
     end
-    markFruitFavoriteState(entry, wantFavorite)
-    return true
+    return false
 end
 
 function fruitEntryMatchesSelect(entry, fruitName)
@@ -2543,9 +2583,9 @@ end
 
 function tryFavoriteSelectedOnce()
     if not genv.ftgs_AutoFavoriteSelect or not selectedFavoriteFruit then return end
-    for fruitId, entry in pairs(getHarvestedFruitBucket() or {}) do
-        if type(entry) == "table" and fruitEntryMatchesSelect(entry, selectedFavoriteFruit) and not isFruitFavorited(entry) then
-            setFruitFavoriteById(getHarvestedFruitId(fruitId, entry), entry, true)
+    for _, item in ipairs(iterCropInventoryEntries()) do
+        if fruitEntryMatchesSelect(item.entry, selectedFavoriteFruit) and not isFruitFavorited(item.entry) then
+            setFruitFavoriteById(item.id, item.entry, true, item.category)
             return
         end
     end
@@ -2553,9 +2593,9 @@ end
 
 function tryUnfavoriteSelectedOnce()
     if not genv.ftgs_AutoUnfavoriteSelect or not selectedFavoriteFruit then return end
-    for fruitId, entry in pairs(getHarvestedFruitBucket() or {}) do
-        if type(entry) == "table" and fruitEntryMatchesSelect(entry, selectedFavoriteFruit) and isFruitFavorited(entry) then
-            setFruitFavoriteById(getHarvestedFruitId(fruitId, entry), entry, false)
+    for _, item in ipairs(iterCropInventoryEntries()) do
+        if fruitEntryMatchesSelect(item.entry, selectedFavoriteFruit) and isFruitFavorited(item.entry) then
+            setFruitFavoriteById(item.id, item.entry, false, item.category)
             return
         end
     end
@@ -2563,9 +2603,9 @@ end
 
 function tryFavoriteAllOnce()
     if not genv.ftgs_AutoFavoriteAll then return end
-    for fruitId, entry in pairs(getHarvestedFruitBucket() or {}) do
-        if type(entry) == "table" and not isFruitFavorited(entry) then
-            setFruitFavoriteById(getHarvestedFruitId(fruitId, entry), entry, true)
+    for _, item in ipairs(iterCropInventoryEntries()) do
+        if not isFruitFavorited(item.entry) then
+            setFruitFavoriteById(item.id, item.entry, true, item.category)
             return
         end
     end
@@ -2573,9 +2613,9 @@ end
 
 function tryUnfavoriteAllOnce()
     if not genv.ftgs_AutoUnfavoriteAll then return end
-    for fruitId, entry in pairs(getHarvestedFruitBucket() or {}) do
-        if type(entry) == "table" and isFruitFavorited(entry) then
-            setFruitFavoriteById(getHarvestedFruitId(fruitId, entry), entry, false)
+    for _, item in ipairs(iterCropInventoryEntries()) do
+        if isFruitFavorited(item.entry) then
+            setFruitFavoriteById(item.id, item.entry, false, item.category)
             return
         end
     end
@@ -2825,6 +2865,7 @@ end
 function cancelStealAction()
     stealSessionId += 1
     stealBusy = false
+    lastStealPlot = nil
     movementBypass = false
     gardenActionLock = false
     local hum = getHumanoid()
@@ -4386,8 +4427,7 @@ function tryAutoSteal()
     cachedStealTargets = nil
     lastStealTargetScan = 0
     safeNetCall(Net.Garden and Net.Garden.RequestGardens)
-    local preview = collectAllStealTargets()
-    if #preview == 0 then return end
+    if #collectAllStealTargets() == 0 then return end
 
     stealBusy = true
     local sessionId = stealSessionId
@@ -4399,49 +4439,71 @@ function tryAutoSteal()
 
         movementBypass = true
         gardenActionLock = true
-        local stolenTotal = 0
         local didStealAny = false
 
         while autoStealOn() and sessionId == stealSessionId and not isInventoryFull() and isNightTime() do
+            local atHome = isNearOwnPlotCenter(28)
             cachedStealTargets = nil
             lastStealTargetScan = 0
             local targets = collectAllStealTargets()
             if #targets == 0 then break end
 
-            local gotOne = false
+            local plotEntry = nil
             for _, t in ipairs(targets) do
-                if stolenTotal >= STEAL_BATCH then break end
+                if atHome and lastStealPlot == t.plot then continue end
+                local owner = t.owner
+                if owner and isOwnerInPlot(t.plot, owner) then continue end
+                if owner and not plotUnlocked(owner) then continue end
+                plotEntry = t
+                break
+            end
+            if not plotEntry and atHome and lastStealPlot then
+                lastStealPlot = nil
+                for _, t in ipairs(targets) do
+                    local owner = t.owner
+                    if owner and isOwnerInPlot(t.plot, owner) then continue end
+                    if owner and not plotUnlocked(owner) then continue end
+                    plotEntry = t
+                    break
+                end
+            end
+            if not plotEntry then break end
+
+            local plot = plotEntry.plot
+            local owner = plotEntry.owner
+            local uid = owner and owner.UserId or plotEntry.ownerUserId
+            local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH)
+            if #fruits == 0 then
+                lastStealPlot = plot
+                if atHome then
+                    task.wait(STEAL_SESSION_GAP)
+                    continue
+                end
+                break
+            end
+
+            local batchStolen = 0
+            for _, fruit in ipairs(fruits) do
+                if batchStolen >= STEAL_BATCH then break end
                 if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
                 if isInventoryFull() then break end
-
-                local plot = t.plot
-                local owner = t.owner
-                if owner and isOwnerInPlot(plot, owner) then continue end
-                if owner and not plotUnlocked(owner) then continue end
-                local uid = owner and owner.UserId or t.ownerUserId
-                local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH - stolenTotal)
-
-                for _, fruit in ipairs(fruits) do
-                    if stolenTotal >= STEAL_BATCH then break end
-                    if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
-                    if isInventoryFull() then break end
-                    if owner and isOwnerInPlot(plot, owner) then break end
-                    if stealFruit(fruit, uid, sessionId) then
-                        stolenTotal += 1
-                        didStealAny = true
-                        gotOne = true
-                    end
+                if owner and isOwnerInPlot(plot, owner) then break end
+                if stealFruit(fruit, uid, sessionId) then
+                    batchStolen += 1
+                    didStealAny = true
                 end
             end
 
-            if stolenTotal >= STEAL_BATCH then
-                teleportToGardenCenter()
-                stolenTotal = 0
-                cachedStealTargets = nil
-                lastStealTargetScan = 0
-                task.wait(STEAL_SESSION_GAP)
-            elseif not gotOne then
-                break
+            if batchStolen <= 0 then break end
+
+            lastStealPlot = plot
+            teleportToGardenCenter()
+            cachedStealTargets = nil
+            lastStealTargetScan = 0
+            task.wait(STEAL_SESSION_GAP)
+
+            if not isNearOwnPlotCenter(32) then
+                task.wait(0.06)
             end
         end
 
@@ -5552,35 +5614,23 @@ function fixLagPruneConnections(service, eventName)
 end
 
 function fixLagCleanupEffects()
-    local Workspace = Services.Workspace
-    local Debris = Services.Debris
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") then
-            local hum = obj.Parent and obj.Parent:FindFirstChildOfClass("Humanoid")
-            if not hum then
-                pcall(function() Debris:AddItem(obj, FIX_LAG_EFFECT_CLEANUP) end)
-            end
-        end
-    end
+    return
 end
 
 function startFixLag()
     stopFixLag()
-    local RunService = Services.RunService
     local LogService = Services.LogService
     local ScriptContext = Services.ScriptContext
     fixLagDisconnectNonForeign(LogService, "MessageOut")
     fixLagDisconnectNonForeign(ScriptContext, "Error")
-    fixLagCleanupEffects()
     local lastCheck = os.clock()
-    fixLagMainConn = RunService.Heartbeat:Connect(function()
+    fixLagMainConn = Services.RunService.Heartbeat:Connect(function()
         if os.clock() - lastCheck < FIX_LAG_CHECK_INTERVAL then return end
         lastCheck = os.clock()
         fixLagDisconnectNonForeign(LogService, "MessageOut")
         fixLagDisconnectNonForeign(ScriptContext, "Error")
-        fixLagPruneConnections(RunService, "Heartbeat")
-        fixLagPruneConnections(RunService, "Stepped")
-        fixLagCleanupEffects()
+        fixLagPruneConnections(Services.RunService, "Heartbeat")
+        fixLagPruneConnections(Services.RunService, "Stepped")
     end)
 end
 
@@ -5630,13 +5680,17 @@ function applyMovementBypass(dt)
     local hrp = getRoot()
     if not hum or not hrp then return end
     applyMovement()
-    if hum.PlatformStand and not stealBusy and not collectingMutation and not isCatchingPet then
-        hum.PlatformStand = false
+    if hum.PlatformStand then hum.PlatformStand = false end
+    if hum.Sit then hum.Sit = false end
+    local st = hum:GetState()
+    if st == Enum.HumanoidStateType.Physics or st == Enum.HumanoidStateType.FallingDown or st == Enum.HumanoidStateType.Ragdoll then
+        xpcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end, noopErr)
     end
     local dir = hum.MoveDirection
+    hrp.AssemblyAngularVelocity = Vector3.zero
     if dir.Magnitude <= 0.05 then
         if not (stealBusy or gardenActionLock or collectingMutation or isCatchingPet) then
-            hrp.AssemblyAngularVelocity = Vector3.zero
+            hrp.AssemblyLinearVelocity = Vector3.new(0, hrp.AssemblyLinearVelocity.Y, 0)
         end
         return
     end
@@ -5647,8 +5701,7 @@ function applyMovementBypass(dt)
     local step = speed * (dt or (1 / 60))
     local vy = hrp.AssemblyLinearVelocity.Y
     hrp.AssemblyLinearVelocity = Vector3.new(flat.X * speed, vy, flat.Z * speed)
-    hrp.AssemblyAngularVelocity = Vector3.zero
-    hrp.CFrame = hrp.CFrame + flat * math.min(step, 2.5)
+    hrp.CFrame = hrp.CFrame + flat * math.min(step, 3)
     lastMovementBypassAt = os.clock()
 end
 
@@ -5713,30 +5766,101 @@ function clearFruitEsp()
         if item.highlight then item.highlight:Destroy() end
         if item.billboard then item.billboard:Destroy() end
     end
+    for _, pool in fruitEspPool do
+        if pool.highlight then pool.highlight:Destroy() end
+        if pool.billboard then pool.billboard:Destroy() end
+    end
     fruitEspItems = {}
+    fruitEspPool = {}
 end
 
-function findTopValueFruits(limit)
-    limit = limit or 10
+function getPlotEspLabel(plot)
+    if not plot then return "Garden" end
+    local oid = plot:GetAttribute("OwnerUserId")
+    local owner = oid and Services.Players:GetPlayerByUserId(tonumber(oid) or oid)
+    if owner then return owner.DisplayName end
+    return plot.Name
+end
+
+function collectPlotFruits(plot)
     local list = {}
-    if not Gardens then return list end
-    for _, plot in Gardens:GetChildren() do
-        local plants = plot:FindFirstChild("Plants")
-        if not plants then continue end
-        for _, plant in plants:GetChildren() do
-            local fruits = plant:FindFirstChild("Fruits")
-            local scan = fruits and fruits:GetChildren() or { plant }
-            for _, fr in scan do
-                local part = fr:IsA("BasePart") and fr or fr:FindFirstChildWhichIsA("BasePart", true)
-                if part then
-                    list[#list + 1] = { fruit = fr, part = part, value = calculateStealValue(fr), plot = plot.Name }
-                end
+    local plants = plot:FindFirstChild("Plants")
+    if not plants then return list end
+    for _, plant in plants:GetChildren() do
+        local fruits = plant:FindFirstChild("Fruits")
+        local scan = fruits and fruits:GetChildren() or { plant }
+        for _, fr in scan do
+            local part = fr:IsA("BasePart") and fr or fr:FindFirstChildWhichIsA("BasePart", true)
+            if part then
+                list[#list + 1] = {
+                    fruit = fr,
+                    part = part,
+                    value = calculateStealValue(fr) or 0,
+                    plot = getPlotEspLabel(plot),
+                }
             end
         end
     end
-    table.sort(list, function(a, b) return (a.value or 0) > (b.value or 0) end)
+    return list
+end
+
+function scanFruitEspTargets()
+    local allFruits = {}
+    local perGardenBest = {}
+    if not Gardens then return {} end
+    for _, plot in Gardens:GetChildren() do
+        local plotFruits = collectPlotFruits(plot)
+        if #plotFruits == 0 then continue end
+        table.sort(plotFruits, function(a, b) return (a.value or 0) > (b.value or 0) end)
+        local maxVal = plotFruits[1].value or 0
+        local bestInGarden = {}
+        for _, entry in ipairs(plotFruits) do
+            allFruits[#allFruits + 1] = entry
+            if (entry.value or 0) >= maxVal - 0.01 then
+                bestInGarden[#bestInGarden + 1] = entry
+            else
+                break
+            end
+        end
+        if #bestInGarden > 0 then perGardenBest[plot] = bestInGarden end
+    end
+    table.sort(allFruits, function(a, b) return (a.value or 0) > (b.value or 0) end)
     local out = {}
-    for i = 1, math.min(limit, #list) do out[i] = list[i] end
+    local seen = {}
+    for i = 1, math.min(10, #allFruits) do
+        local entry = allFruits[i]
+        if not seen[entry.fruit] then
+            seen[entry.fruit] = true
+            out[#out + 1] = {
+                entry = entry,
+                label = "#" .. i .. " " .. tostring(math.floor(entry.value or 0)),
+            }
+        end
+    end
+    for _, plot in Gardens:GetChildren() do
+        local bestList = perGardenBest[plot]
+        if not bestList then continue end
+        for _, entry in ipairs(bestList) do
+            if seen[entry.fruit] then continue end
+            seen[entry.fruit] = true
+            out[#out + 1] = {
+                entry = entry,
+                label = entry.plot .. " MAX " .. tostring(math.floor(entry.value or 0)),
+            }
+        end
+    end
+    return out
+end
+
+function findTopValueFruits(limit)
+    local targets = scanFruitEspTargets()
+    if limit and #targets > limit then
+        local out = {}
+        for i = 1, limit do out[i] = targets[i].entry end
+        return out
+    end
+    local out = {}
+    for i, t in ipairs(targets) do out[i] = t.entry end
     return out
 end
 
@@ -5751,35 +5875,20 @@ function ensureFruitEspFolder()
     return fruitEspFolder
 end
 
-function updateFruitEsp()
-    if not genv.ftgs_FruitESP then
-        clearFruitEsp()
-        return
-    end
-    local targets = findTopValueFruits(10)
-    if #targets == 0 then
-        clearFruitEsp()
-        return
-    end
-    ensureFruitEspFolder()
-    clearFruitEsp()
-    for i, t in targets do
+function syncFruitEspVisual(key, target, labelText, index)
+    local pool = fruitEspPool[key]
+    if not pool then
         local hl = Instance.new("Highlight")
-        hl.Name = "NTMT_FruitESP_" .. i
-        hl.Adornee = t.fruit
+        hl.Name = "NTMT_FruitESP"
         hl.FillColor = Color3.fromRGB(255, 60, 200)
         hl.OutlineColor = Color3.fromRGB(255, 255, 80)
         hl.FillTransparency = 0.35
         hl.OutlineTransparency = 0
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.Parent = fruitEspFolder
         local bb = Instance.new("BillboardGui")
         bb.Name = "NTMT_ValueTag"
-        bb.Adornee = t.part
-        bb.Size = UDim2.fromOffset(110, 30)
-        bb.StudsOffset = Vector3.new(0, 2.5 + i * 0.15, 0)
+        bb.Size = UDim2.fromOffset(140, 30)
         bb.AlwaysOnTop = true
-        bb.Parent = fruitEspFolder
         local label = Instance.new("TextLabel")
         label.BackgroundTransparency = 1
         label.Size = UDim2.fromScale(1, 1)
@@ -5787,9 +5896,41 @@ function updateFruitEsp()
         label.TextScaled = true
         label.TextColor3 = Color3.fromRGB(255, 255, 120)
         label.TextStrokeTransparency = 0.4
-        label.Text = "#" .. i .. " " .. tostring(math.floor(t.value or 0))
         label.Parent = bb
-        fruitEspItems[#fruitEspItems + 1] = { highlight = hl, billboard = bb }
+        pool = { highlight = hl, billboard = bb, label = label }
+        fruitEspPool[key] = pool
+    end
+    ensureFruitEspFolder()
+    pool.highlight.Adornee = target.fruit
+    pool.highlight.Parent = fruitEspFolder
+    pool.billboard.Adornee = target.part
+    pool.billboard.StudsOffset = Vector3.new(0, 2.5 + (index or 0) * 0.08, 0)
+    pool.billboard.Parent = fruitEspFolder
+    pool.label.Text = labelText or ""
+end
+
+function updateFruitEsp()
+    if not genv.ftgs_FruitESP then
+        clearFruitEsp()
+        return
+    end
+    local targets = scanFruitEspTargets()
+    if #targets == 0 then
+        clearFruitEsp()
+        return
+    end
+    local active = {}
+    for i, t in ipairs(targets) do
+        local key = t.entry.fruit
+        active[key] = true
+        syncFruitEspVisual(key, t.entry, t.label, i)
+    end
+    for key, pool in pairs(fruitEspPool) do
+        if not active[key] then
+            if pool.highlight then pool.highlight:Destroy() end
+            if pool.billboard then pool.billboard:Destroy() end
+            fruitEspPool[key] = nil
+        end
     end
 end
 
@@ -6011,26 +6152,101 @@ function tryExpand()
     safeNetCall(Net.Actions and Net.Actions.ExpandGarden)
 end
 
+function isCollectDropPrompt(prompt)
+    if not prompt or not prompt:IsA("ProximityPrompt") then return false end
+    local action = (prompt.ActionText or ""):lower()
+    local obj = (prompt.ObjectText or ""):lower()
+    return action:find("pick", 1, true) or action:find("collect", 1, true) or action:find("grab", 1, true) or obj:find("drop", 1, true)
+end
+
+function getDropPromptPart(prompt)
+    local parent = prompt.Parent
+    if not parent then return nil end
+    return parent:IsA("BasePart") and parent or parent:FindFirstChildWhichIsA("BasePart", true)
+end
+
+function addDropPromptEntry(prompt)
+    if dropPromptSet[prompt] or not isCollectDropPrompt(prompt) then return end
+    local part = getDropPromptPart(prompt)
+    if not part then return end
+    dropPromptSet[prompt] = true
+    dropPromptCache[#dropPromptCache + 1] = { prompt = prompt, part = part, dist = 0 }
+    prompt.AncestryChanged:Connect(function(_, parent)
+        if not parent then dropPromptSet[prompt] = nil end
+    end)
+end
+
+function registerDropInstance(inst)
+    if not inst then return end
+    if inst:IsA("ProximityPrompt") then
+        addDropPromptEntry(inst)
+        return
+    end
+    local prompt = inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt then addDropPromptEntry(prompt) end
+end
+
+function hookDropContainer(container)
+    if not container or container:GetAttribute("NTMT_DropHooked") then return end
+    container:SetAttribute("NTMT_DropHooked", true)
+    container.DescendantAdded:Connect(function(desc)
+        if desc:IsA("ProximityPrompt") then addDropPromptEntry(desc) end
+    end)
+    container.ChildAdded:Connect(function(ch)
+        task.defer(function() registerDropInstance(ch) end)
+    end)
+    for _, ch in container:GetChildren() do
+        task.defer(function() registerDropInstance(ch) end)
+    end
+end
+
+function setupDropWatchers()
+    initMapFolders()
+    local first = not dropWatchReady
+    dropWatchReady = true
+    local dropNames = { "ItemDrops", "Drops", "Collectibles", "SeedPackSpawns" }
+    local map = Services.Workspace:FindFirstChild("Map")
+    if map then
+        for _, name in dropNames do
+            local folder = map:FindFirstChild(name)
+            if folder then hookDropContainer(folder) end
+        end
+        if first then
+            map.ChildAdded:Connect(function(ch)
+                for _, name in dropNames do
+                    if ch.Name == name then hookDropContainer(ch) end
+                end
+            end)
+        end
+    end
+    for _, name in { "Drops", "ItemDrops" } do
+        local folder = Services.Workspace:FindFirstChild(name)
+        if folder then hookDropContainer(folder) end
+    end
+    if Gardens then hookDropContainer(Gardens) end
+    refreshOwnerPlot()
+    if OwnerPlot then hookDropContainer(OwnerPlot) end
+    if SeedPackSpawns then hookDropContainer(SeedPackSpawns) end
+    if first then task.defer(function() rebuildDropPromptCache(true) end) end
+end
+
 function scanDropPromptsInto(container, out, hrpPos)
     if not container then return end
     for _, item in container:GetDescendants() do
         if not item:IsA("ProximityPrompt") then continue end
-        local action = (item.ActionText or ""):lower()
-        local obj = (item.ObjectText or ""):lower()
-        if not (action:find("pick") or action:find("collect") or action:find("grab") or obj:find("drop")) then continue end
-        local parent = item.Parent
-        if not parent then continue end
-        local part = parent:IsA("BasePart") and parent or parent:FindFirstChildWhichIsA("BasePart", true)
+        if not isCollectDropPrompt(item) then continue end
+        local part = getDropPromptPart(item)
         if not part then continue end
         if hrpPos and (part.Position - hrpPos).Magnitude > DROP_COLLECT_RADIUS then continue end
         out[#out + 1] = { prompt = item, part = part, dist = hrpPos and (part.Position - hrpPos).Magnitude or 0 }
+        dropPromptSet[item] = true
     end
 end
 
 function rebuildDropPromptCache(fullScan)
+    if not fullScan and #dropPromptCache > 0 and os.clock() - lastDropScan < DROP_SCAN_INTERVAL then return end
     dropPromptCache = {}
-    local hrp = getRoot()
-    local hrpPos = fullScan and nil or (hrp and hrp.Position)
+    dropPromptSet = {}
     local roots = {}
     local map = Services.Workspace:FindFirstChild("Map")
     if map then
@@ -6038,47 +6254,39 @@ function rebuildDropPromptCache(fullScan)
             local folder = map:FindFirstChild(name)
             if folder then roots[#roots + 1] = folder end
         end
-        roots[#roots + 1] = map
     end
     for _, name in { "Drops", "ItemDrops" } do
         local folder = Services.Workspace:FindFirstChild(name)
         if folder then roots[#roots + 1] = folder end
     end
+    if SeedPackSpawns then roots[#roots + 1] = SeedPackSpawns end
     if Gardens then roots[#roots + 1] = Gardens end
     if OwnerPlot then roots[#roots + 1] = OwnerPlot end
-    for _, root in roots do scanDropPromptsInto(root, dropPromptCache, hrpPos) end
+    for _, root in roots do scanDropPromptsInto(root, dropPromptCache, nil) end
     table.sort(dropPromptCache, function(a, b) return a.dist < b.dist end)
     lastDropScan = os.clock()
 end
 
 function findNearestDropPrompt()
+    setupDropWatchers()
     local hrp = getRoot()
     if not hrp then return nil end
-    if os.clock() - lastDropScan > DROP_SCAN_INTERVAL then rebuildDropPromptCache(true) end
-    if #dropPromptCache == 0 then
-        rebuildDropPromptCache(true)
-    end
+    if os.clock() - lastDropScan > DROP_SCAN_INTERVAL then rebuildDropPromptCache(false) end
+    if #dropPromptCache == 0 then rebuildDropPromptCache(true) end
     if #dropPromptCache == 0 then return nil end
     local hrpPos = hrp.Position
     local best, bestDist = nil, math.huge
-    for _, entry in dropPromptCache do
-        if entry.prompt and entry.prompt.Parent and entry.part and entry.part.Parent then
+    for i = #dropPromptCache, 1, -1 do
+        local entry = dropPromptCache[i]
+        if not entry.prompt or not entry.prompt.Parent or not entry.part or not entry.part.Parent then
+            table.remove(dropPromptCache, i)
+            if entry.prompt then dropPromptSet[entry.prompt] = nil end
+        else
             local dist = (entry.part.Position - hrpPos).Magnitude
+            entry.dist = dist
             if dist < bestDist then
                 bestDist = dist
                 best = { prompt = entry.prompt, part = entry.part }
-            end
-        end
-    end
-    if not best then
-        rebuildDropPromptCache(true)
-        for _, entry in dropPromptCache do
-            if entry.prompt and entry.prompt.Parent and entry.part and entry.part.Parent then
-                local dist = (entry.part.Position - hrpPos).Magnitude
-                if dist < bestDist then
-                    bestDist = dist
-                    best = { prompt = entry.prompt, part = entry.part }
-                end
             end
         end
     end
@@ -6090,24 +6298,19 @@ function tryCollectDrops()
     local nearest = findNearestDropPrompt()
     if not nearest then return end
     dropsBusy = true
-    task.spawn(function()
-        movementBypass = true
-        gardenActionLock = true
-        tpInstant(nearest.part.Position)
-        task.wait(0.02)
-        for _ = 1, 8 do
-            if not autoCollectDropsOn() then break end
-            if nearest.part and nearest.part.Parent then
-                tpInstant(nearest.part.Position)
-            end
-            fireProximityPromptFast(nearest.prompt)
-            task.wait(0.03)
-        end
-        movementBypass = false
-        gardenActionLock = false
-        dropsBusy = false
-        lastDropScan = 0
-    end)
+    movementBypass = true
+    gardenActionLock = true
+    tpInstant(nearest.part.Position)
+    for _ = 1, 10 do
+        if not autoCollectDropsOn() then break end
+        if nearest.part and nearest.part.Parent then tpInstant(nearest.part.Position) end
+        fireProximityPromptFast(nearest.prompt)
+        task.wait(0.015)
+    end
+    movementBypass = false
+    gardenActionLock = false
+    dropsBusy = false
+    lastDropScan = 0
 end
 
 function tryAutoCollectTick()
@@ -6555,7 +6758,7 @@ SettingsTab:Toggle({ Title = "Anti Hit", Desc = "no knockback if someone hit you
 end })
 SettingsTab:Section({ Title = "Visual" })
 SettingsTab:Toggle({ Title = "Fullbright", Desc = "night vision", Default = genv.ftgs_Fullbright or false, Callback = function(s) setFullbright(s) end })
-SettingsTab:Toggle({ Title = "Fruit ESP", Desc = "10 value fruit in every garden", Default = genv.ftgs_FruitESP == true, Callback = function(s)
+SettingsTab:Toggle({ Title = "Fruit ESP", Desc = "Top 10 server + max value per garden", Default = genv.ftgs_FruitESP == true, Callback = function(s)
     genv.ftgs_FruitESP = s
     saveConfig()
     if not s then clearFruitEsp() end
@@ -6742,9 +6945,10 @@ hubLoop(function()
 end)
 
 hubLoop(function()
+    setupDropWatchers()
     while true do
         if autoCollectMutationOn() or autoCollectDropsOn() then safeLoop(tryAutoCollectTick) end
-        task.wait(collectingMutation and 0.06 or 0.08)
+        task.wait(collectingMutation and 0.12 or 0.1)
     end
 end)
 
@@ -6837,7 +7041,7 @@ end)
 hubLoop(function()
     while true do
         if genv.ftgs_FruitESP then safeLoop(updateFruitEsp) end
-        task.wait(1.2)
+        task.wait(FRUIT_ESP_INTERVAL)
     end
 end)
 
@@ -6916,7 +7120,7 @@ task.spawn(function()
     end
 end)
 
-print("[NTMT HUB v6.9] Loaded | " .. Executor)
+print("[NTMT HUB v7.0] Loaded | " .. Executor)
 
 pcall(function()
     game:GetService("StarterGui"):SetCore("SendNotification", {
