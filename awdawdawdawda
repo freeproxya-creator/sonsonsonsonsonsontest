@@ -1,5 +1,5 @@
---[[ NTMT HUB - Grow a Garden 2 v1.1 | UI: redz-V5 | made by nguoitinhmuathu ]]
-print("[NTMT HUB] BOOT v7.4")
+--[[ NTMT HUB - Grow a Garden 2 v7.5 | UI: redz-V5 | made by nguoitinhmuathu ]]
+print("[NTMT HUB] BOOT v7.5")
 
 pcall(function()
     if delfile and isfile then
@@ -18,7 +18,7 @@ end)
 -- KEY + DISCORD (edit here)
 ------------------------------------------------------------
 local HUB_LICENSE_KEY = "NTMT-HUB-KEY-FREE-TRIALS"
-local DISCORD_LINK = "https://discord.gg/BY3NrJMENc"
+local DISCORD_LINK = "https://discord.gg/VX4rBQyDKJ"
 local MADE_BY = "nguoitinhmuathu | @58g6"
 
 local genv = _G
@@ -4262,6 +4262,38 @@ end
 
 -- ===== STEAL =====
 
+function invalidateStealTargetCache()
+    cachedStealTargets = nil
+    lastStealTargetScan = 0
+end
+
+function isStealPlotLocked(plot, owner)
+    if not plot then return true end
+    refreshOwnerPlot()
+    if OwnerPlot and plot == OwnerPlot then return true end
+    if owner and isOwnerInPlot(plot, owner) then return true end
+    if owner and not plotUnlocked(owner) then return true end
+    if plot:GetAttribute("Locked") == true
+        or plot:GetAttribute("GardenLocked") == true
+        or plot:GetAttribute("IsLocked") == true
+        or plot:GetAttribute("AntiSteal") == true then
+        return true
+    end
+    return false
+end
+
+function getViableStealTargets()
+    invalidateStealTargetCache()
+    local all = collectAllStealTargets()
+    local out = {}
+    for _, t in ipairs(all) do
+        if not isStealPlotLocked(t.plot, t.owner) then
+            out[#out + 1] = t
+        end
+    end
+    return out
+end
+
 function plotUnlocked(player)
     if not player or not Gardens then return false end
     local plot
@@ -4374,9 +4406,9 @@ function isPlotStealable(plot)
     if not plot then return false end
     local owner, uid = getPlotStealOwner(plot)
     if owner == LocalPlayer then return false end
-    if owner and isOwnerInPlot(plot, owner) then return false end
+    if isStealPlotLocked(plot, owner) then return false end
     if owner == nil and uid == 0 then return true end
-    if owner and plotUnlocked(owner) then return true end
+    if owner then return true end
     return false
 end
 
@@ -4484,8 +4516,9 @@ function tpToStealPlot(plot)
     return true
 end
 
-function stealFruit(fruit, ownerUserId, sessionId)
+function stealFruit(fruit, ownerUserId, sessionId, plot, owner)
     if not autoStealOn() or sessionId ~= stealSessionId or not isNightTime() then return false end
+    if plot and owner and isStealPlotLocked(plot, owner) then return false end
     if not fruit or not fruit.Parent then return false end
     local stealPos, uid, plantId, fruitId = resolveStealTarget(fruit, ownerUserId)
     if not stealPos or not plantId then return false end
@@ -4501,6 +4534,7 @@ function stealFruit(fruit, ownerUserId, sessionId)
 
     while os.clock() < deadline do
         if not autoStealOn() or sessionId ~= stealSessionId or not isNightTime() then break end
+        if plot and owner and isStealPlotLocked(plot, owner) then break end
         if isStealComplete(fruit, fruitCountBefore) or not fruit.Parent then break end
         tpInstant(stealPos)
         local prompt = getStealPrompt(fruit)
@@ -4525,15 +4559,45 @@ function pickStealPlotTarget(targets)
     if #targets == 0 then return nil end
     local filtered = {}
     for _, t in ipairs(targets) do
-        if OwnerPlot and t.plot == OwnerPlot then continue end
-        local owner = t.owner
-        if owner and isOwnerInPlot(t.plot, owner) then continue end
-        if owner and not plotUnlocked(owner) then continue end
-        filtered[#filtered + 1] = t
+        if not isStealPlotLocked(t.plot, t.owner) then
+            filtered[#filtered + 1] = t
+        end
     end
     if #filtered == 0 then return nil end
     local idx = ((stealPlotRotation - 1) % #filtered) + 1
     return filtered[idx], idx, #filtered
+end
+
+local function runStealBatch(sessionId)
+    local batchStolen = 0
+    local targets = getViableStealTargets()
+    for _, t in ipairs(targets) do
+        if batchStolen >= STEAL_BATCH then break end
+        if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
+        if isInventoryFull() then break end
+
+        local plot = t.plot
+        local owner = t.owner
+        if isStealPlotLocked(plot, owner) then continue end
+
+        local uid = owner and owner.UserId or t.ownerUserId
+        local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH - batchStolen)
+        if #fruits == 0 then continue end
+
+        for _, fruit in fruits do
+            if batchStolen >= STEAL_BATCH then break end
+            if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
+            if isInventoryFull() then break end
+            if isStealPlotLocked(plot, owner) then break end
+            if stealFruit(fruit, uid, sessionId, plot, owner) then
+                batchStolen += 1
+                movementBypass = true
+                gardenActionLock = true
+            end
+            task.wait(0.015)
+        end
+    end
+    return batchStolen
 end
 
 function tryAutoSteal()
@@ -4551,42 +4615,12 @@ function tryAutoSteal()
         task.wait(0.03)
         movementBypass = true
         gardenActionLock = true
-        cachedStealTargets = nil
-        lastStealTargetScan = 0
 
-        local targets = collectAllStealTargets()
-        if #targets == 0 then
-            finishStealSession(sessionId, false)
-            return
-        end
-
-        local batchStolen = 0
-        for _, t in ipairs(targets) do
-            if batchStolen >= STEAL_BATCH then break end
-            if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
-            if isInventoryFull() then break end
-
-            local plot = t.plot
-            local owner = t.owner
-            if owner and isOwnerInPlot(plot, owner) then continue end
-            if owner and not plotUnlocked(owner) then continue end
-
-            local uid = owner and owner.UserId or t.ownerUserId
-            local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH - batchStolen)
-            if #fruits == 0 then continue end
-
-            for _, fruit in fruits do
-                if batchStolen >= STEAL_BATCH then break end
-                if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
-                if isInventoryFull() then break end
-                if owner and isOwnerInPlot(plot, owner) then break end
-                if stealFruit(fruit, uid, sessionId) then
-                    batchStolen += 1
-                    movementBypass = true
-                    gardenActionLock = true
-                end
-                task.wait(0.015)
-            end
+        local batchStolen = runStealBatch(sessionId)
+        if batchStolen == 0 then
+            task.wait(0.05)
+            invalidateStealTargetCache()
+            batchStolen = runStealBatch(sessionId)
         end
 
         refreshOwnerPlot()
@@ -7570,7 +7604,7 @@ task.spawn(function()
     end
 end)
 
-print("[NTMT HUB v1.1] Loaded | " .. Executor)
+print("[NTMT HUB v7.5] Loaded | " .. Executor)
 
 pcall(function()
     game:GetService("StarterGui"):SetCore("SendNotification", {
