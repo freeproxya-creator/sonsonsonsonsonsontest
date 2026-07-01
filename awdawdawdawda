@@ -1,5 +1,5 @@
---[[ NTMT HUB - Grow a Garden 2 v7.1 | UI: redz-V5 | made by nguoitinhmuathu ]]
-print("[NTMT HUB] BOOT v7.1")
+--[[ NTMT HUB - Grow a Garden 2 v7.2 | UI: redz-V5 | made by nguoitinhmuathu ]]
+print("[NTMT HUB] BOOT v7.2")
 
 pcall(function()
     if delfile and isfile then
@@ -864,10 +864,17 @@ NEAR_PLAYER_DIST = 45
 PLOT_EDGE_MARGIN = 65
 SPRINKLER_MIN_DIST = 8
 STEAL_BATCH = 3
-STEAL_FRUIT_ATTEMPTS = 10
+STEAL_FRUIT_ATTEMPTS = 5
 STEAL_ATTEMPT_WAIT = 0
-STEAL_TARGET_CACHE_TTL = 0.6
-STEAL_SESSION_GAP = 0.03
+STEAL_TARGET_CACHE_TTL = 1.2
+STEAL_SESSION_GAP = 0.2
+STEAL_IDLE_WAIT = 0.45
+lastStealGardenRequest = 0
+PET_TAME_FIRES = 6
+PET_BUY_INTERVAL = 0.35
+lastPetTameRef = nil
+lastPetTameAt = 0
+PET_TAME_LOCK_SEC = 3
 stealPlotRotation = 0
 lastHarvestBestScan = 0
 cachedHarvestBest = nil
@@ -900,7 +907,7 @@ fakeLagThreadId = 0
 gardenActionLock = false
 gardenActionLockSince = 0
 GARDEN_LOCK_MAX = 10
-plantingBusy, sprinklerBusy, shovelBusy, stealBusy, dropsBusy, wateringBusy = false, false, false, false, false, false
+plantingBusy, sprinklerBusy, shovelBusy, stealBusy, dropsBusy, wateringBusy, petBuyBusy = false, false, false, false, false, false, false
 sprinkledSpots = {}
 sprinkledPlantKeys = {}
 lastWater = 0
@@ -2053,6 +2060,8 @@ genv.ftgs_AutoWebhook = false
 genv.ftgs_AutoSendMail = false
 genv.ftgs_FixLag = false
 genv.ftgs_AutoExecute = false
+genv.ftgs_AutoTranslate = true
+genv.ftgs_AutoDoubleOrNothing = false
 genv.ftgs_FakeLag = false
 fakeLagDelay = 2
 fakeLagThread = nil
@@ -2083,11 +2092,11 @@ HITBOX_BODY_PARTS = { "UpperTorso", "LowerTorso", "Torso", "Head", "HumanoidRoot
 HITBOX_SIZE = 21
 HITBOX_TRANSPARENCY = 0.6
 TRANSLATE_LANG_NAMES = {
-    "English", "Vietnamese", "Thai", "Russian", "Portuguese", "Korean",
+    "English", "Vietnamese", "Thai", "Chinese", "Russian", "Portuguese", "Korean",
     "Japanese", "German", "French", "Spanish", "Indonesian", "Filipino",
 }
 TRANSLATE_LANG_CODES = {
-    English = "en", Vietnamese = "vi", Thai = "th", Russian = "ru", Portuguese = "pt",
+    English = "en", Vietnamese = "vi", Thai = "th", Chinese = "zh", Russian = "ru", Portuguese = "pt",
     Korean = "ko", Japanese = "ja", German = "de", French = "fr", Spanish = "es",
     Indonesian = "id", Filipino = "tl",
 }
@@ -2196,6 +2205,8 @@ function saveConfig()
             fakeLag = genv.ftgs_FakeLag == true,
             fakeLagDelay = fakeLagDelay,
             translateLanguage = translateLanguage,
+            autoTranslate = genv.ftgs_AutoTranslate == true,
+            autoDoubleOrNothing = genv.ftgs_AutoDoubleOrNothing == true,
             selectedBgTheme = selectedBgTheme,
             visualMoneyAmount = visualMoneyAmount,
             privateServerCode = privateServerCode,
@@ -2234,6 +2245,8 @@ function loadConfig()
     if data.fakeLag ~= nil then genv.ftgs_FakeLag = data.fakeLag == true end
     fakeLagDelay = 2
     if type(data.translateLanguage) == "string" then translateLanguage = data.translateLanguage end
+    if data.autoTranslate ~= nil then genv.ftgs_AutoTranslate = data.autoTranslate == true end
+    if data.autoDoubleOrNothing ~= nil then genv.ftgs_AutoDoubleOrNothing = data.autoDoubleOrNothing == true end
     if type(data.selectedBgTheme) == "string" then selectedBgTheme = data.selectedBgTheme end
     visualMoneyAmount = tonumber(data.visualMoneyAmount) or visualMoneyAmount
     if visualMoneyAmount == 0 then visualMoneyAmount = nil end
@@ -4401,6 +4414,21 @@ function findMutationSeedSpawn()
     return nil
 end
 
+function requestGardensIfDue()
+    if os.clock() - lastStealGardenRequest < 2 then return end
+    lastStealGardenRequest = os.clock()
+    safeNetCall(Net.Garden and Net.Garden.RequestGardens)
+end
+
+function tpToStealPlot(plot)
+    if not plot then return false end
+    local pos = getPlotCenterPos(plot)
+    if not pos then return false end
+    movementBypass = true
+    tpInstant(pos)
+    return true
+end
+
 function stealFruit(fruit, ownerUserId, sessionId)
     if not autoStealOn() or sessionId ~= stealSessionId or not isNightTime() then return false end
     if not fruit or not fruit.Parent then return false end
@@ -4416,12 +4444,11 @@ function stealFruit(fruit, ownerUserId, sessionId)
     for attempt = 1, STEAL_FRUIT_ATTEMPTS do
         if not autoStealOn() or sessionId ~= stealSessionId or not isNightTime() then break end
         if isStealComplete(fruit, fruitCountBefore) or not fruit.Parent then break end
-        if attempt == 1 or attempt % 4 == 0 then tpInstant(stealPos) end
+        if attempt == 1 or attempt == STEAL_FRUIT_ATTEMPTS then tpInstant(stealPos) end
         local prompt = getStealPrompt(fruit)
         if prompt then fireProximityPromptFast(prompt) end
         safeNetCall(Net.Steal and Net.Steal.BeginSteal, uid, plantId, fruitId)
         safeNetCall(Net.Steal and Net.Steal.CompleteSteal)
-        if STEAL_ATTEMPT_WAIT > 0 then task.wait(STEAL_ATTEMPT_WAIT) end
     end
 
     if not autoStealOn() or sessionId ~= stealSessionId then return false end
@@ -4464,7 +4491,7 @@ function tryAutoSteal()
         movementBypass = true
         gardenActionLock = true
 
-        safeNetCall(Net.Garden and Net.Garden.RequestGardens)
+        requestGardensIfDue()
         local targets = collectAllStealTargets()
         local plotEntry, pickedIdx, totalPlots = pickStealPlotTarget(targets)
         if not plotEntry then
@@ -4475,6 +4502,10 @@ function tryAutoSteal()
         local plot = plotEntry.plot
         local owner = plotEntry.owner
         local uid = owner and owner.UserId or plotEntry.ownerUserId
+
+        tpToStealPlot(plot)
+        task.wait(0.05)
+
         local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH)
         local batchStolen = 0
 
@@ -4488,22 +4519,18 @@ function tryAutoSteal()
             end
         end
 
-        if batchStolen > 0 or not isNearOwnPlotCenter(36) then
-            refreshOwnerPlot()
-            teleportToGardenCenter()
-            local hrp = getRoot()
-            if hrp and savedPlotCenter then
-                hrp.AssemblyLinearVelocity = Vector3.zero
-                hrp.CFrame = CFrame.new(savedPlotCenter + Vector3.new(0, 3, 0))
-            end
-            lastStealReturn = os.clock()
+        refreshOwnerPlot()
+        teleportToGardenCenter()
+        local hrp = getRoot()
+        if hrp and savedPlotCenter then
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.CFrame = CFrame.new(savedPlotCenter + Vector3.new(0, 3, 0))
         end
+        lastStealReturn = os.clock()
 
         if totalPlots and totalPlots > 0 then
             stealPlotRotation = (pickedIdx % totalPlots) + 1
         end
-        cachedStealTargets = nil
-        lastStealTargetScan = 0
         finishStealSession(sessionId, false)
     end)
 end
@@ -4532,7 +4559,11 @@ function isRefTameable(refPart)
 end
 
 function tryBuyPet()
-    if not autoBuyPetOn() then return end
+    if lastPetTameRef and (not lastPetTameRef.Parent or not isRefTameable(lastPetTameRef)) then
+        lastPetTameRef = nil
+    end
+    if not autoBuyPetOn() or petBuyBusy or isCatchingPet then return end
+    if os.clock() - lastPet < PET_BUY_INTERVAL then return end
     initMapFolders()
     if not WildPetFolder then return end
     local candidates = {}
@@ -4566,18 +4597,24 @@ function tryBuyPet()
     if #candidates == 0 then return end
     table.sort(candidates, function(a, b) return (a.price or 0) < (b.price or 0) end)
     local pick = candidates[1]
-    local tameRemote = Net.Pets and Net.Pets.WildPetTame
+    if pick.ref == lastPetTameRef and os.clock() - lastPetTameAt < PET_TAME_LOCK_SEC then return end
+    lastPetTameRef = pick.ref
+    lastPetTameAt = os.clock()
+    lastPet = os.clock()
+    petBuyBusy = true
+    movementBypass = true
     if pick.pos then tpInstant(pick.pos) end
+    local tameRemote = Net.Pets and Net.Pets.WildPetTame
     if tameRemote then
-        for _ = 1, 64 do
+        for _ = 1, PET_TAME_FIRES do
             if not autoBuyPetOn() or not pick.ref or not pick.ref.Parent then break end
             safeNetCall(tameRemote, pick.ref)
         end
     end
     local prompt = pick.ref and pick.ref:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if prompt then
-        for _ = 1, 10 do fireProximityPromptFast(prompt) end
-    end
+    if prompt then fireProximityPromptFast(prompt) end
+    movementBypass = false
+    petBuyBusy = false
 end
 
 function hasIntruderOnPlot()
@@ -5246,8 +5283,10 @@ function isHubUiInstance(inst)
     if not inst then return false end
     local p = inst
     while p do
-        if p:IsA("ScreenGui") and (p:GetAttribute("NTMTHubUI") == true or hubScreenGuis[p]) then
-            return true
+        if p:IsA("ScreenGui") then
+            if p:GetAttribute("NTMTHubUI") == true or hubScreenGuis[p] then return true end
+            local n = string.lower(p.Name or "")
+            if n:find("ntmt", 1, true) or n:find("windui", 1, true) or n:find("redz", 1, true) then return true end
         end
         p = p.Parent
     end
@@ -5327,8 +5366,45 @@ function registerUiTextInstance(inst)
         local code = TRANSLATE_LANG_CODES[translateLanguage] or "en"
         if code == "en" then
             data.original = inst.Text
+        elseif genv.ftgs_AutoTranslate and inst.Text and inst.Text ~= "" and inst.Text ~= data.original then
+            task.defer(function() applyUiTextTranslation(inst, data) end)
         end
     end)
+    if genv.ftgs_AutoTranslate then
+        task.defer(function() applyUiTextTranslation(inst, data) end)
+    end
+end
+
+function applyUiTextTranslation(inst, data)
+    if not inst or not inst.Parent or not data then return end
+    if not genv.ftgs_AutoTranslate then return end
+    local code = TRANSLATE_LANG_CODES[translateLanguage] or "en"
+    if code == "en" then
+        if data.original and data.original ~= "" then
+            data.translating = true
+            inst.Text = data.original
+            data.translating = false
+        end
+        return
+    end
+    local src = data.original
+    if not src or src == "" then src = inst.Text end
+    if not src or src == "" then return end
+    local out = translateUiText(src, code)
+    if out and out ~= inst.Text then
+        data.translating = true
+        inst.Text = out
+        data.translating = false
+    end
+end
+
+function refreshAllUiTranslations()
+    rescanHubUiTextRegistry()
+    if not genv.ftgs_AutoTranslate then
+        restoreAllUiText()
+        return
+    end
+    applyUiLanguage(translateLanguage)
 end
 
 function applyUiLanguage(langName)
@@ -5340,9 +5416,9 @@ function applyUiLanguage(langName)
         restoreAllUiText()
         rescanHubUiTextRegistry()
         local code = TRANSLATE_LANG_CODES[translateLanguage] or "en"
-        if code == "en" then
+        if code == "en" or not genv.ftgs_AutoTranslate then
             translateBusy = false
-            hubNotify("Translate", "English restored")
+            if code == "en" then hubNotify("Translate", "English restored") end
             return
         end
         table.clear(translationCache)
@@ -5356,6 +5432,12 @@ function applyUiLanguage(langName)
                 map[data.original][#map[data.original] + 1] = inst
             end
         end
+        local pending = #unique
+        if pending == 0 then
+            translateBusy = false
+            return
+        end
+        local done = 0
         for _, text in unique do
             task.spawn(function()
                 local out = translateUiText(text, code)
@@ -5367,9 +5449,11 @@ function applyUiLanguage(langName)
                         data.translating = false
                     end
                 end
+                done += 1
             end)
         end
-        task.wait(1.8)
+        local deadline = os.clock() + 2.8
+        while done < pending and os.clock() < deadline do task.wait(0.05) end
         translateBusy = false
         hubNotify("Translate", "NTMT UI → " .. translateLanguage)
     end)
@@ -5379,8 +5463,12 @@ function setupHubUiTranslationWatcher()
     markHubScreenGuis()
     local function watchSg(sg)
         if not sg or not sg:IsA("ScreenGui") then return end
-        if sg:GetAttribute("NTMTHubUI") ~= true and not hubScreenGuis[sg] then return end
+        if sg:GetAttribute("NTMTHubUI") ~= true and not hubScreenGuis[sg] then
+            local n = string.lower(sg.Name or "")
+            if not (n:find("ntmt", 1, true) or n:find("windui", 1, true) or n:find("redz", 1, true)) then return end
+        end
         hubScreenGuis[sg] = true
+        sg:SetAttribute("NTMTHubUI", true)
         for _, d in sg:GetDescendants() do registerUiTextInstance(d) end
         sg.DescendantAdded:Connect(function(d)
             task.defer(function()
@@ -5390,6 +5478,9 @@ function setupHubUiTranslationWatcher()
     end
     for _, sg in LocalPlayer:WaitForChild("PlayerGui"):GetChildren() do watchSg(sg) end
     LocalPlayer.PlayerGui.ChildAdded:Connect(function(ch) task.defer(function() watchSg(ch) end) end)
+    if genv.ftgs_AutoTranslate and translateLanguage ~= "English" then
+        task.delay(0.6, function() applyUiLanguage(translateLanguage) end)
+    end
 end
 
 function resolveThemeImageAsset(url, themeName)
@@ -6120,6 +6211,96 @@ function trySellEverytime()
     safeNetCall(Net.NPCS and Net.NPCS.SellAll)
 end
 
+function findPlayerGuiText(matchFn)
+    if type(matchFn) ~= "function" then return nil end
+    local roots = {}
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    if pg then roots[#roots + 1] = pg end
+    if type(gethui) == "function" then
+        xpcall(function() roots[#roots + 1] = gethui() end, noopErr)
+    end
+    for _, root in roots do
+        if not root then continue end
+        for _, d in root:GetDescendants() do
+            if (d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox")) and type(d.Text) == "string" and d.Text ~= "" then
+                if matchFn(d.Text) and not isHubUiInstance(d) then return d end
+            end
+        end
+    end
+    return nil
+end
+
+function clickGuiElement(gui)
+    if not gui then return false end
+    local target = gui
+    if not target:IsA("GuiButton") then
+        local p = gui.Parent
+        while p do
+            if p:IsA("TextButton") or p:IsA("ImageButton") then
+                target = p
+                break
+            end
+            p = p.Parent
+        end
+    end
+    if type(firesignal) == "function" and target:IsA("GuiButton") then
+        if select(1, xpcall(function() firesignal(target.MouseButton1Click) end, noopErr)) then return true end
+    end
+    if target:IsA("GuiButton") and type(getconnections) == "function" then
+        local ok, conns = pcall(getconnections, target.MouseButton1Click)
+        if ok and type(conns) == "table" then
+            for _, c in conns do
+                if c and type(c.Function) == "function" then
+                    xpcall(c.Function, noopErr)
+                end
+            end
+            return true
+        end
+    end
+    return false
+end
+
+function pressDialogueKey(keyCode)
+    local vim = Services.VirtualInputManager
+    if not vim or not keyCode then return end
+    xpcall(function()
+        vim:SendKeyEvent(true, keyCode, false, game)
+        vim:SendKeyEvent(false, keyCode, false, game)
+    end, noopErr)
+end
+
+function tryDoubleOrNothing()
+    if not genv.ftgs_AutoDoubleOrNothing then return end
+    local lowerSell = function(t)
+        local lower = string.lower(t)
+        return lower:find("sell", 1, true) and (lower:find("sell:", 1, true) or lower:find("[sell", 1, true) or lower:find("sell [", 1, true))
+    end
+    local hasCongrats = findPlayerGuiText(function(t)
+        return string.lower(t):find("congrats", 1, true) ~= nil
+    end)
+    if hasCongrats then
+        local sellOpt = findPlayerGuiText(lowerSell)
+        if sellOpt and clickGuiElement(sellOpt) then return end
+        pressDialogueKey(Enum.KeyCode.One)
+        safeNetCall(Net.NPCS and Net.NPCS.SellAll)
+        return
+    end
+    local doubleOpt = findPlayerGuiText(function(t)
+        return string.lower(t):find("double or nothing", 1, true) ~= nil
+    end)
+    if doubleOpt then
+        if clickGuiElement(doubleOpt) then return end
+        pressDialogueKey(Enum.KeyCode.Four)
+        return
+    end
+    for _, path in {
+        "DoubleOrNothing", "Gamble", "SellGamble", "PlayDoubleOrNothing", "DoubleNothing",
+    } do
+        local remote = Net.NPCS and Net.NPCS[path]
+        if remote then safeNetCall(remote) end
+    end
+end
+
 function tryExpand()
     if not autoExpandOn() then return end
     if os.clock() - lastExpand < COOLDOWN.Expand then return end
@@ -6617,6 +6798,7 @@ multiDropdown(MainTab, "Except Harvest", SeedNames, exceptHarvestPlants, true)
 multiDropdown(MainTab, "Collect Only", SeedNames, collectOnlyPlants, true)
 makeToggle(MainTab, "Auto Sell WHEN FULL BAG", "Sell when bag full", "ftgs_AutoSell")
 makeToggle(MainTab, "Auto Sell", "auto sell", "ftgs_AutoSellEverytime")
+makeToggle(MainTab, "Auto Double or Nothing", "Gamble at sell NPC — auto sell if win", "ftgs_AutoDoubleOrNothing")
 MainTab:Section({ Title = "Favorite Fruits" })
 MainTab:Dropdown({ Title = "Select Fruit", Values = SeedNames, Value = selectedFavoriteFruit, Callback = function(v)
     if type(v) == "table" then v = v[1] end
@@ -6828,8 +7010,13 @@ SettingsTab:Toggle({ Title = "Auto Execute", Desc = "auto turn on script", Defau
     saveConfig()
     cacheScriptSourceForAutoExec()
 end })
-SettingsTab:Section({ Title = "UI Language (1 click)" })
-SettingsTab:Dropdown({ Title = "Language", Desc = "select language you want to translate to", Values = TRANSLATE_LANG_NAMES, Value = translateLanguage, Callback = function(v)
+SettingsTab:Section({ Title = "UI Language" })
+SettingsTab:Toggle({ Title = "Auto Translate UI", Desc = "Auto translate tabs, toggles, labels (2-3s)", Default = genv.ftgs_AutoTranslate ~= false, Callback = function(s)
+    genv.ftgs_AutoTranslate = s == true
+    saveConfig()
+    refreshAllUiTranslations()
+end })
+SettingsTab:Dropdown({ Title = "Language", Desc = "Target language for UI", Values = TRANSLATE_LANG_NAMES, Value = translateLanguage, Callback = function(v)
     if type(v) == "table" then v = v[1] end
     applyUiLanguage(v or translateLanguage)
 end })
@@ -6964,7 +7151,7 @@ hubLoop(function()
         if autoStealOn() and not stealBusy and isNightTime() then safeLoop(tryAutoSteal) end
         if autoStealOn() and not isNightTime() and not stealDawnReturnDone then handleStealDawnReturn() end
         flushStealConfigIfDue()
-        task.wait(stealBusy and 0.02 or STEAL_SESSION_GAP)
+        task.wait(stealBusy and 0.05 or (autoStealOn() and isNightTime() and STEAL_SESSION_GAP or STEAL_IDLE_WAIT))
     end
 end)
 
@@ -6979,7 +7166,14 @@ end)
 hubLoop(function()
     while true do
         if autoBuyPetOn() then safeLoop(tryBuyPet) end
-        task.wait(0.01)
+        task.wait(PET_BUY_INTERVAL)
+    end
+end)
+
+hubLoop(function()
+    while true do
+        if genv.ftgs_AutoDoubleOrNothing then safeLoop(tryDoubleOrNothing) end
+        task.wait(0.25)
     end
 end)
 
@@ -7148,6 +7342,9 @@ if hubKeyUnlocked and genv.ftgs_FixLag then startFixLag() end
 if hubKeyUnlocked and genv.ftgs_FakeLag then setFakeLag(true, 2) end
 task.defer(function()
     xpcall(setupHubUiTranslationWatcher, noopErr)
+    if genv.ftgs_AutoTranslate and translateLanguage ~= "English" then
+        task.delay(1, function() xpcall(refreshAllUiTranslations, noopErr) end)
+    end
 end)
 
 task.spawn(function()
@@ -7159,7 +7356,7 @@ task.spawn(function()
     end
 end)
 
-print("[NTMT HUB v7.1] Loaded | " .. Executor)
+print("[NTMT HUB v7.2] Loaded | " .. Executor)
 
 pcall(function()
     game:GetService("StarterGui"):SetCore("SendNotification", {
