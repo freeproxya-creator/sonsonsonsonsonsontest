@@ -1,5 +1,5 @@
---[[ NTMT HUB - Grow a Garden 2 v7.2 | UI: redz-V5 | made by nguoitinhmuathu ]]
-print("[NTMT HUB] BOOT v7.2")
+--[[ NTMT HUB - Grow a Garden 2 v7.3 | UI: redz-V5 | made by nguoitinhmuathu ]]
+print("[NTMT HUB] BOOT v7.3")
 
 pcall(function()
     if delfile and isfile then
@@ -499,6 +499,28 @@ end
 local RedzLib
 local redzWindow
 
+local hubUiEntries = {}
+
+local function registerHubUiEntry(original, setterFn)
+    if type(original) ~= "string" or original == "" or type(setterFn) ~= "function" then return end
+    hubUiEntries[#hubUiEntries + 1] = { original = original, set = setterFn }
+end
+
+local function applyRedzWidgetText(obj, text, field)
+    if not obj or type(text) ~= "string" then return end
+    field = field or "title"
+    if field == "title" then
+        if type(obj.SetTitle) == "function" then pcall(function() obj:SetTitle(text) end) end
+        pcall(function() if obj.Title ~= nil then obj.Title = text end end)
+        if obj.TEXT and type(obj.TEXT.SetText) == "function" then pcall(function() obj.TEXT:SetText(text) end) end
+    else
+        if type(obj.SetDescription) == "function" then pcall(function() obj:SetDescription(text) end) end
+        if type(obj.SetDesc) == "function" then pcall(function() obj:SetDesc(text) end) end
+        pcall(function() if obj.Description ~= nil then obj.Description = text end end)
+        if obj.DESCRIPTION and type(obj.DESCRIPTION.SetText) == "function" then pcall(function() obj.DESCRIPTION:SetText(text) end) end
+    end
+end
+
 local function markRedzScreenGui()
     pcall(function()
         local roots = {}
@@ -558,35 +580,46 @@ local function wrapTab(tab)
         tab:AddSection(type(cfg) == "table" and cfg.Title or cfg)
     end
     function wrapper:Toggle(cfg)
-        return tab:AddToggle({
+        local obj = tab:AddToggle({
             Title = cfg.Title,
             Description = cfg.Desc or cfg.Description,
             Default = cfg.Default,
             Callback = cfg.Callback,
         })
+        registerHubUiEntry(cfg.Title, function(t) applyRedzWidgetText(obj, t, "title") end)
+        registerHubUiEntry(cfg.Desc or cfg.Description, function(t) applyRedzWidgetText(obj, t, "desc") end)
+        return obj
     end
     function wrapper:Button(cfg)
-        return tab:AddButton({
+        local obj = tab:AddButton({
             Title = cfg.Title,
             Description = cfg.Desc or cfg.Description,
             Callback = cfg.Callback,
             Debounce = cfg.Debounce or cfg.Cooldown,
         })
+        registerHubUiEntry(cfg.Title, function(t) applyRedzWidgetText(obj, t, "title") end)
+        registerHubUiEntry(cfg.Desc or cfg.Description, function(t) applyRedzWidgetText(obj, t, "desc") end)
+        return obj
     end
     function wrapper:Input(cfg)
-        return wrapTextBox(tab:AddTextBox({
+        local obj = tab:AddTextBox({
             Title = cfg.Title,
             Default = cfg.Value,
             Placeholder = cfg.Placeholder or cfg.PlaceholderText,
             ClearOnFocus = cfg.ClearOnFocus,
             Callback = cfg.Callback,
-        }))
+        })
+        registerHubUiEntry(cfg.Title, function(t) applyRedzWidgetText(obj, t, "title") end)
+        registerHubUiEntry(cfg.Placeholder or cfg.PlaceholderText, function(t)
+            if obj.TEXTBOX then obj.TEXTBOX.PlaceholderText = t end
+        end)
+        return wrapTextBox(obj)
     end
     function wrapper:Slider(cfg)
         local vmin = cfg.Value and cfg.Value.Min or cfg.Min or 0
         local vmax = cfg.Value and cfg.Value.Max or cfg.Max or 100
         local vdef = cfg.Value and cfg.Value.Default or cfg.Default or vmin
-        return tab:AddSlider({
+        local obj = tab:AddSlider({
             Title = cfg.Title,
             Description = cfg.Desc or cfg.Description,
             Min = vmin,
@@ -595,6 +628,9 @@ local function wrapTab(tab)
             Default = vdef,
             Callback = cfg.Callback,
         })
+        registerHubUiEntry(cfg.Title, function(t) applyRedzWidgetText(obj, t, "title") end)
+        registerHubUiEntry(cfg.Desc or cfg.Description, function(t) applyRedzWidgetText(obj, t, "desc") end)
+        return obj
     end
     function wrapper:Dropdown(cfg)
         local multi = cfg.Multi or cfg.MultiSelect
@@ -602,7 +638,7 @@ local function wrapTab(tab)
         if multi and type(default) == "string" then
             default = { default }
         end
-        return tab:AddDropdown({
+        local obj = tab:AddDropdown({
             Title = cfg.Title,
             Description = cfg.Desc or cfg.Description,
             Options = cfg.Values or cfg.Options,
@@ -610,9 +646,17 @@ local function wrapTab(tab)
             MultiSelect = multi,
             Callback = cfg.Callback,
         })
+        registerHubUiEntry(cfg.Title, function(t) applyRedzWidgetText(obj, t, "title") end)
+        registerHubUiEntry(cfg.Desc or cfg.Description, function(t) applyRedzWidgetText(obj, t, "desc") end)
+        return obj
     end
     function wrapper:Paragraph(cfg)
-        return wrapParagraph(tab:AddParagraph(cfg.Title or "", cfg.Desc or cfg.Description or cfg.Content or ""))
+        local title = cfg.Title or ""
+        local desc = cfg.Desc or cfg.Description or cfg.Content or ""
+        local obj = tab:AddParagraph(title, desc)
+        registerHubUiEntry(title, function(t) applyRedzWidgetText(obj, t, "title") end)
+        registerHubUiEntry(desc, function(t) applyRedzWidgetText(obj, t, "desc") end)
+        return wrapParagraph(obj)
     end
     return wrapper
 end
@@ -621,7 +665,9 @@ local function wrapWindow(window)
     redzWindow = window
     local wrapper = {}
     function wrapper:Tab(cfg)
-        return wrapTab(window:MakeTab({ Title = cfg.Title, Icon = cfg.Icon }))
+        local tabObj = window:MakeTab({ Title = cfg.Title, Icon = cfg.Icon })
+        registerHubUiEntry(cfg.Title, function(t) applyRedzWidgetText(tabObj, t, "title") end)
+        return wrapTab(tabObj)
     end
     function wrapper:Tag() end
     function wrapper:SetTheme(_name)
@@ -640,6 +686,11 @@ local function createRedzCompatLib(lib)
             SubTitle = cfg.Author or cfg.SubTitle or "",
             ScriptFolder = cfg.Folder or cfg.ScriptFolder or "ntmthub",
         })
+        registerHubUiEntry(cfg.Title or "NTMT HUB", function(t) applyRedzWidgetText(window, t, "title") end)
+        registerHubUiEntry(cfg.Author or cfg.SubTitle or "", function(t)
+            if type(window.SetSubTitle) == "function" then pcall(function() window:SetSubTitle(t) end) end
+            pcall(function() if window.SubTitle ~= nil then window.SubTitle = t end end)
+        end)
         task.defer(markRedzScreenGui)
         return wrapWindow(window)
     end
@@ -864,11 +915,11 @@ NEAR_PLAYER_DIST = 45
 PLOT_EDGE_MARGIN = 65
 SPRINKLER_MIN_DIST = 8
 STEAL_BATCH = 3
-STEAL_FRUIT_ATTEMPTS = 5
+STEAL_FRUIT_ATTEMPTS = 3
 STEAL_ATTEMPT_WAIT = 0
 STEAL_TARGET_CACHE_TTL = 1.2
-STEAL_SESSION_GAP = 0.2
-STEAL_IDLE_WAIT = 0.45
+STEAL_SESSION_GAP = 0.08
+STEAL_IDLE_WAIT = 0.35
 lastStealGardenRequest = 0
 PET_TAME_FIRES = 6
 PET_BUY_INTERVAL = 0.35
@@ -2126,6 +2177,10 @@ hitboxOriginalProps, defendHitboxActive = {}, false
 translateLanguage = "English"
 translationRegistry, translationCache = {}, {}
 hubScreenGuis = {}
+donPending, donLastClickAt, donLastSellAt = false, 0, 0
+DON_ACTION_COOLDOWN = 1.5
+DON_PENDING_TIMEOUT = 8
+PET_TAME_HOLD_SEC = 2.2
 fpsBoosterConn, fpsBoosterRestore, fixLagMainConn = nil, nil, nil
 FIX_LAG_CHECK_INTERVAL = 10
 FIX_LAG_MAX_CONNECTIONS = 100
@@ -4503,10 +4558,15 @@ function tryAutoSteal()
         local owner = plotEntry.owner
         local uid = owner and owner.UserId or plotEntry.ownerUserId
 
-        tpToStealPlot(plot)
-        task.wait(0.05)
-
         local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH)
+        if #fruits == 0 then
+            if totalPlots and totalPlots > 0 then
+                stealPlotRotation = (pickedIdx % totalPlots) + 1
+            end
+            finishStealSession(sessionId, false)
+            return
+        end
+
         local batchStolen = 0
 
         for _, fruit in ipairs(fruits) do
@@ -4520,12 +4580,8 @@ function tryAutoSteal()
         end
 
         refreshOwnerPlot()
-        teleportToGardenCenter()
-        local hrp = getRoot()
-        if hrp and savedPlotCenter then
-            hrp.AssemblyLinearVelocity = Vector3.zero
-            hrp.CFrame = CFrame.new(savedPlotCenter + Vector3.new(0, 3, 0))
-        end
+        local homePos = getGardenCenterPos()
+        if homePos then tpInstant(homePos) end
         lastStealReturn = os.clock()
 
         if totalPlots and totalPlots > 0 then
@@ -4602,19 +4658,30 @@ function tryBuyPet()
     lastPetTameAt = os.clock()
     lastPet = os.clock()
     petBuyBusy = true
-    movementBypass = true
-    if pick.pos then tpInstant(pick.pos) end
-    local tameRemote = Net.Pets and Net.Pets.WildPetTame
-    if tameRemote then
-        for _ = 1, PET_TAME_FIRES do
-            if not autoBuyPetOn() or not pick.ref or not pick.ref.Parent then break end
-            safeNetCall(tameRemote, pick.ref)
+    task.spawn(function()
+        isCatchingPet = true
+        movementBypass = true
+        gardenActionLock = true
+        local hum = getHumanoid()
+        if hum then hum.PlatformStand = true end
+        local ref = pick.ref
+        local tameRemote = Net.Pets and Net.Pets.WildPetTame
+        local deadline = os.clock() + PET_TAME_HOLD_SEC
+        while autoBuyPetOn() and os.clock() < deadline do
+            if not ref or not ref.Parent or not isRefTameable(ref) then break end
+            local pos = (ref and ref.Position) or pick.pos
+            if pos then stickToPosition(pos) end
+            if tameRemote then safeNetCall(tameRemote, ref) end
+            local prompt = ref and ref:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt then fireProximityPromptFast(prompt) end
+            task.wait(0.07)
         end
-    end
-    local prompt = pick.ref and pick.ref:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if prompt then fireProximityPromptFast(prompt) end
-    movementBypass = false
-    petBuyBusy = false
+        if hum then hum.PlatformStand = false end
+        isCatchingPet = false
+        movementBypass = false
+        gardenActionLock = false
+        petBuyBusy = false
+    end)
 end
 
 function hasIntruderOnPlot()
@@ -5344,13 +5411,40 @@ function rescanHubUiTextRegistry()
     end
 end
 
+function registerUiPlaceholder(inst)
+    if not inst or not inst:IsA("TextBox") then return end
+    if not isHubUiInstance(inst) then return end
+    local key = inst .. ":ph"
+    if translationRegistry[key] then return end
+    local data = { original = inst.PlaceholderText or "", translating = false, inst = inst, isPlaceholder = true }
+    translationRegistry[key] = data
+    inst:GetPropertyChangedSignal("PlaceholderText"):Connect(function()
+        if data.translating then return end
+        local code = TRANSLATE_LANG_CODES[translateLanguage] or "en"
+        if code == "en" then
+            data.original = inst.PlaceholderText
+        end
+    end)
+end
+
 function restoreAllUiText()
     rescanHubUiTextRegistry()
-    for inst, data in translationRegistry do
-        if inst and inst.Parent and isHubUiInstance(inst) then
+    for key, data in translationRegistry do
+        if data.isPlaceholder then
+            if data.inst and data.inst.Parent then
+                data.translating = true
+                data.inst.PlaceholderText = data.original or ""
+                data.translating = false
+            end
+        elseif typeof(key) == "Instance" and key.Parent and isHubUiInstance(key) then
             data.translating = true
-            inst.Text = data.original or ""
+            key.Text = data.original or ""
             data.translating = false
+        end
+    end
+    for _, entry in hubUiEntries do
+        if entry.original and entry.set then
+            pcall(function() entry.set(entry.original) end)
         end
     end
 end
@@ -5370,6 +5464,7 @@ function registerUiTextInstance(inst)
             task.defer(function() applyUiTextTranslation(inst, data) end)
         end
     end)
+    if inst:IsA("TextBox") then registerUiPlaceholder(inst) end
     if genv.ftgs_AutoTranslate then
         task.defer(function() applyUiTextTranslation(inst, data) end)
     end
@@ -5422,9 +5517,16 @@ function applyUiLanguage(langName)
             return
         end
         table.clear(translationCache)
+        for _, entry in hubUiEntries do
+            if entry.original and entry.original ~= "" and entry.set then
+                local out = translateUiText(entry.original, code)
+                pcall(function() entry.set(out) end)
+                task.wait(0.012)
+            end
+        end
         local unique, map = {}, {}
         for inst, data in translationRegistry do
-            if inst and inst.Parent and isHubUiInstance(inst) and data.original and data.original ~= "" then
+            if typeof(inst) == "Instance" and inst.Parent and isHubUiInstance(inst) and data.original and data.original ~= "" and not data.isPlaceholder then
                 if not map[data.original] then
                     map[data.original] = {}
                     unique[#unique + 1] = data.original
@@ -5432,28 +5534,27 @@ function applyUiLanguage(langName)
                 map[data.original][#map[data.original] + 1] = inst
             end
         end
-        local pending = #unique
-        if pending == 0 then
-            translateBusy = false
-            return
-        end
-        local done = 0
         for _, text in unique do
-            task.spawn(function()
-                local out = translateUiText(text, code)
-                for _, inst in map[text] or {} do
-                    local data = translationRegistry[inst]
-                    if data and inst.Parent then
-                        data.translating = true
-                        inst.Text = out
-                        data.translating = false
-                    end
+            local out = translateUiText(text, code)
+            for _, inst in map[text] or {} do
+                local data = translationRegistry[inst]
+                if data and inst.Parent then
+                    data.translating = true
+                    inst.Text = out
+                    data.translating = false
                 end
-                done += 1
-            end)
+            end
+            task.wait(0.012)
         end
-        local deadline = os.clock() + 2.8
-        while done < pending and os.clock() < deadline do task.wait(0.05) end
+        for _, data in translationRegistry do
+            if data.isPlaceholder and data.original and data.original ~= "" and data.inst and data.inst.Parent then
+                local out = translateUiText(data.original, code)
+                data.translating = true
+                data.inst.PlaceholderText = out
+                data.translating = false
+                task.wait(0.012)
+            end
+        end
         translateBusy = false
         hubNotify("Translate", "NTMT UI → " .. translateLanguage)
     end)
@@ -6271,6 +6372,7 @@ end
 
 function tryDoubleOrNothing()
     if not genv.ftgs_AutoDoubleOrNothing then return end
+    local now = os.clock()
     local lowerSell = function(t)
         local lower = string.lower(t)
         return lower:find("sell", 1, true) and (lower:find("sell:", 1, true) or lower:find("[sell", 1, true) or lower:find("sell [", 1, true))
@@ -6279,6 +6381,9 @@ function tryDoubleOrNothing()
         return string.lower(t):find("congrats", 1, true) ~= nil
     end)
     if hasCongrats then
+        if now - donLastSellAt < DON_ACTION_COOLDOWN then return end
+        donLastSellAt = now
+        donPending = false
         local sellOpt = findPlayerGuiText(lowerSell)
         if sellOpt and clickGuiElement(sellOpt) then return end
         pressDialogueKey(Enum.KeyCode.One)
@@ -6288,17 +6393,16 @@ function tryDoubleOrNothing()
     local doubleOpt = findPlayerGuiText(function(t)
         return string.lower(t):find("double or nothing", 1, true) ~= nil
     end)
-    if doubleOpt then
-        if clickGuiElement(doubleOpt) then return end
-        pressDialogueKey(Enum.KeyCode.Four)
+    if not doubleOpt then
+        if donPending and now - donLastClickAt > DON_PENDING_TIMEOUT then donPending = false end
         return
     end
-    for _, path in {
-        "DoubleOrNothing", "Gamble", "SellGamble", "PlayDoubleOrNothing", "DoubleNothing",
-    } do
-        local remote = Net.NPCS and Net.NPCS[path]
-        if remote then safeNetCall(remote) end
-    end
+    if donPending then return end
+    if now - donLastClickAt < DON_ACTION_COOLDOWN then return end
+    donPending = true
+    donLastClickAt = now
+    if clickGuiElement(doubleOpt) then return end
+    pressDialogueKey(Enum.KeyCode.Four)
 end
 
 function tryExpand()
@@ -7037,6 +7141,15 @@ InfoTab:Paragraph({ Title = "Roblox User", Desc = LocalPlayer.Name })
 activePara = InfoTab:Paragraph({ Title = "Active", Desc = "0h 00m 00s" })
 InfoTab:Paragraph({ Title = "Made by", Desc = MADE_BY })
 
+    task.defer(function()
+        markHubScreenGuis()
+        markRedzScreenGui()
+        rescanHubUiTextRegistry()
+        if genv.ftgs_AutoTranslate and translateLanguage ~= "English" then
+            task.wait(0.6)
+            xpcall(refreshAllUiTranslations, noopErr)
+        end
+    end)
 end
 
 KeyTab = Window:Tab({ Title = "Key", Icon = "key" })
@@ -7356,7 +7469,7 @@ task.spawn(function()
     end
 end)
 
-print("[NTMT HUB v7.2] Loaded | " .. Executor)
+print("[NTMT HUB v7.3] Loaded | " .. Executor)
 
 pcall(function()
     game:GetService("StarterGui"):SetCore("SendNotification", {
