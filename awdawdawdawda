@@ -1,5 +1,5 @@
---[[ NTMT HUB - Grow a Garden 2 v7.3 | UI: redz-V5 | made by nguoitinhmuathu ]]
-print("[NTMT HUB] BOOT v7.3")
+--[[ NTMT HUB - Grow a Garden 2 v1.1 | UI: redz-V5 | made by nguoitinhmuathu ]]
+print("[NTMT HUB] BOOT v7.4")
 
 pcall(function()
     if delfile and isfile then
@@ -915,8 +915,8 @@ NEAR_PLAYER_DIST = 45
 PLOT_EDGE_MARGIN = 65
 SPRINKLER_MIN_DIST = 8
 STEAL_BATCH = 3
-STEAL_FRUIT_ATTEMPTS = 3
-STEAL_ATTEMPT_WAIT = 0
+STEAL_HOLD_TIMEOUT = 4
+STEAL_TICK = 0.02
 STEAL_TARGET_CACHE_TTL = 1.2
 STEAL_SESSION_GAP = 0.08
 STEAL_IDLE_WAIT = 0.35
@@ -4494,16 +4494,20 @@ function stealFruit(fruit, ownerUserId, sessionId)
     end
 
     local fruitCountBefore = getFruitCount()
+    movementBypass = true
+    gardenActionLock = true
     tpInstant(stealPos)
+    local deadline = os.clock() + STEAL_HOLD_TIMEOUT
 
-    for attempt = 1, STEAL_FRUIT_ATTEMPTS do
+    while os.clock() < deadline do
         if not autoStealOn() or sessionId ~= stealSessionId or not isNightTime() then break end
         if isStealComplete(fruit, fruitCountBefore) or not fruit.Parent then break end
-        if attempt == 1 or attempt == STEAL_FRUIT_ATTEMPTS then tpInstant(stealPos) end
+        tpInstant(stealPos)
         local prompt = getStealPrompt(fruit)
         if prompt then fireProximityPromptFast(prompt) end
         safeNetCall(Net.Steal and Net.Steal.BeginSteal, uid, plantId, fruitId)
         safeNetCall(Net.Steal and Net.Steal.CompleteSteal)
+        task.wait(STEAL_TICK)
     end
 
     if not autoStealOn() or sessionId ~= stealSessionId then return false end
@@ -4543,39 +4547,45 @@ function tryAutoSteal()
             return
         end
 
+        safeNetCall(Net.Garden and Net.Garden.RequestGardens)
+        task.wait(0.03)
         movementBypass = true
         gardenActionLock = true
+        cachedStealTargets = nil
+        lastStealTargetScan = 0
 
-        requestGardensIfDue()
         local targets = collectAllStealTargets()
-        local plotEntry, pickedIdx, totalPlots = pickStealPlotTarget(targets)
-        if not plotEntry then
-            finishStealSession(sessionId, false)
-            return
-        end
-
-        local plot = plotEntry.plot
-        local owner = plotEntry.owner
-        local uid = owner and owner.UserId or plotEntry.ownerUserId
-
-        local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH)
-        if #fruits == 0 then
-            if totalPlots and totalPlots > 0 then
-                stealPlotRotation = (pickedIdx % totalPlots) + 1
-            end
+        if #targets == 0 then
             finishStealSession(sessionId, false)
             return
         end
 
         local batchStolen = 0
-
-        for _, fruit in ipairs(fruits) do
+        for _, t in ipairs(targets) do
             if batchStolen >= STEAL_BATCH then break end
             if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
             if isInventoryFull() then break end
-            if owner and isOwnerInPlot(plot, owner) then break end
-            if stealFruit(fruit, uid, sessionId) then
-                batchStolen += 1
+
+            local plot = t.plot
+            local owner = t.owner
+            if owner and isOwnerInPlot(plot, owner) then continue end
+            if owner and not plotUnlocked(owner) then continue end
+
+            local uid = owner and owner.UserId or t.ownerUserId
+            local fruits = getStealableFruitsOnPlot(plot, STEAL_BATCH - batchStolen)
+            if #fruits == 0 then continue end
+
+            for _, fruit in fruits do
+                if batchStolen >= STEAL_BATCH then break end
+                if sessionId ~= stealSessionId or not autoStealOn() or not isNightTime() then break end
+                if isInventoryFull() then break end
+                if owner and isOwnerInPlot(plot, owner) then break end
+                if stealFruit(fruit, uid, sessionId) then
+                    batchStolen += 1
+                    movementBypass = true
+                    gardenActionLock = true
+                end
+                task.wait(0.015)
             end
         end
 
@@ -4583,10 +4593,6 @@ function tryAutoSteal()
         local homePos = getGardenCenterPos()
         if homePos then tpInstant(homePos) end
         lastStealReturn = os.clock()
-
-        if totalPlots and totalPlots > 0 then
-            stealPlotRotation = (pickedIdx % totalPlots) + 1
-        end
         finishStealSession(sessionId, false)
     end)
 end
@@ -4615,71 +4621,111 @@ function isRefTameable(refPart)
 end
 
 function tryBuyPet()
-    if lastPetTameRef and (not lastPetTameRef.Parent or not isRefTameable(lastPetTameRef)) then
-        lastPetTameRef = nil
-    end
-    if not autoBuyPetOn() or petBuyBusy or isCatchingPet then return end
-    if os.clock() - lastPet < PET_BUY_INTERVAL then return end
+    if not autoBuyPetOn() or not WildPetSpawns or isCatchingPet or petBuyBusy then return end
+    if os.clock() - lastPet < COOLDOWN.Pet then return end
     initMapFolders()
     if not WildPetFolder then return end
     local candidates = {}
-    for _, ref in WildPetFolder:GetChildren() do
-        if not ref:IsA("BasePart") or not ref.Parent then continue end
-        local species = ref:GetAttribute("PetName")
-        if not species or not isRefTameable(ref) then continue end
-        if not matchesAnySelectedPet(species, ref:GetAttribute("PetSize")) then continue end
+    for _, model in WildPetSpawns:GetChildren() do
+        if not model:IsA("Model") then continue end
+        if not matchesAnySelectedPet(model:GetAttribute("PetName"), model:GetAttribute("PetSize")) then continue end
+        local ref = resolveRefFromModel(model)
+        if not ref or not isRefTameable(ref) then continue end
+        local root = model.PrimaryPart or model:FindFirstChild("RootPart") or model:FindFirstChildWhichIsA("BasePart")
+        local price = ref:GetAttribute("Price") or 0
         candidates[#candidates + 1] = {
             ref = ref,
-            species = species,
-            price = ref:GetAttribute("Price") or 0,
-            pos = ref.Position,
+            root = root,
+            model = model,
+            price = price,
+            species = model:GetAttribute("PetName"),
         }
     end
     if #candidates == 0 then
-        for _, model in (WildPetSpawns and WildPetSpawns:GetChildren() or {}) do
-            if not model:IsA("Model") then continue end
-            local species = model:GetAttribute("PetName")
-            local ref = resolveRefFromModel(model)
-            if not ref or not isRefTameable(ref) then continue end
-            if not matchesAnySelectedPet(species, model:GetAttribute("PetSize")) then continue end
+        for _, ref in WildPetFolder:GetChildren() do
+            if not ref:IsA("BasePart") or not ref.Parent then continue end
+            local species = ref:GetAttribute("PetName")
+            if not species or not isRefTameable(ref) then continue end
+            if not matchesAnySelectedPet(species, ref:GetAttribute("PetSize")) then continue end
             candidates[#candidates + 1] = {
                 ref = ref,
                 species = species,
                 price = ref:GetAttribute("Price") or 0,
-                pos = getWildPetPosition({ ref = ref, root = model.PrimaryPart, model = model }),
+                pos = ref.Position,
             }
         end
     end
     if #candidates == 0 then return end
     table.sort(candidates, function(a, b) return (a.price or 0) < (b.price or 0) end)
     local pick = candidates[1]
-    if pick.ref == lastPetTameRef and os.clock() - lastPetTameAt < PET_TAME_LOCK_SEC then return end
-    lastPetTameRef = pick.ref
-    lastPetTameAt = os.clock()
+    local key = tostring(pick.ref)
+    if petCatchCooldown[key] and os.clock() - petCatchCooldown[key] < COOLDOWN.Pet then return end
+    petCatchCooldown[key] = os.clock()
     lastPet = os.clock()
     petBuyBusy = true
+    isCatchingPet = true
+    activeDefendPetPos = nil
     task.spawn(function()
-        isCatchingPet = true
+        local prompt = (pick.model and pick.model:FindFirstChildWhichIsA("ProximityPrompt", true))
+            or (pick.ref and pick.ref:FindFirstChildWhichIsA("ProximityPrompt", true))
+        local tameRemote = Net.Pets and Net.Pets.WildPetTame
+        local function doTame()
+            if prompt then fireProximityPrompt(prompt) end
+            if tameRemote then safeNetCall(tameRemote, pick.ref) end
+        end
         movementBypass = true
         gardenActionLock = true
         local hum = getHumanoid()
         if hum then hum.PlatformStand = true end
-        local ref = pick.ref
-        local tameRemote = Net.Pets and Net.Pets.WildPetTame
-        local deadline = os.clock() + PET_TAME_HOLD_SEC
-        while autoBuyPetOn() and os.clock() < deadline do
-            if not ref or not ref.Parent or not isRefTameable(ref) then break end
-            local pos = (ref and ref.Position) or pick.pos
-            if pos then stickToPosition(pos) end
-            if tameRemote then safeNetCall(tameRemote, ref) end
-            local prompt = ref and ref:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt then fireProximityPromptFast(prompt) end
-            task.wait(0.07)
+        local done, conn = false, nil
+        local tr = Net.Pets and Net.Pets.WildPetTameResult
+        if tr and tr.OnClientEvent then
+            conn = tr.OnClientEvent:Connect(function(_, uid)
+                if uid == LocalPlayer.UserId then done = true end
+            end)
         end
+        local startPos = getWildPetPosition(pick)
+        if startPos then
+            local hrp = getRoot()
+            if hrp and (hrp.Position - startPos).Magnitude > 28 then
+                slowFlyTo(startPos)
+            end
+        end
+        local deadline = os.clock() + 3.5
+        while not done and os.clock() < deadline and autoBuyPetOn() do
+            local pos = getWildPetPosition(pick)
+            if pos then
+                activeDefendPetPos = pos
+                local hrp = getRoot()
+                local dist = hrp and (hrp.Position - pos).Magnitude or 999
+                if dist > 12 then
+                    slowFlyTo(pos)
+                else
+                    stickToPosition(pos)
+                end
+                local intruders = getPlayersNearPosition(pos, PET_DEFEND_RADIUS)
+                if #intruders > 0 then
+                    for _, target in intruders do
+                        local thrp = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+                        if thrp then
+                            tpInstant(thrp.Position + (thrp.CFrame.LookVector * -4))
+                            sendAutoClick(10)
+                        end
+                    end
+                    stickToPosition(pos)
+                end
+            end
+            doTame()
+            task.wait(0.008)
+        end
+        restoreAllHitboxes()
+        activeDefendPetPos = nil
+        if conn then conn:Disconnect() end
+        if done then trackPetBuy(getPetDisplayName(pick.species, nil), pick.price) end
         if hum then hum.PlatformStand = false end
-        isCatchingPet = false
         movementBypass = false
         gardenActionLock = false
+        isCatchingPet = false
         petBuyBusy = false
     end)
 end
@@ -5517,13 +5563,26 @@ function applyUiLanguage(langName)
             return
         end
         table.clear(translationCache)
+
+        local pending, done = 0, 0
+        local deadline = os.clock() + 30
+        local function markDone()
+            done += 1
+        end
+
         for _, entry in hubUiEntries do
             if entry.original and entry.original ~= "" and entry.set then
-                local out = translateUiText(entry.original, code)
-                pcall(function() entry.set(out) end)
-                task.wait(0.012)
+                pending += 1
+                local original = entry.original
+                local setter = entry.set
+                task.spawn(function()
+                    local out = translateUiText(original, code)
+                    pcall(function() setter(out) end)
+                    markDone()
+                end)
             end
         end
+
         local unique, map = {}, {}
         for inst, data in translationRegistry do
             if typeof(inst) == "Instance" and inst.Parent and isHubUiInstance(inst) and data.original and data.original ~= "" and not data.isPlaceholder then
@@ -5535,25 +5594,44 @@ function applyUiLanguage(langName)
             end
         end
         for _, text in unique do
-            local out = translateUiText(text, code)
-            for _, inst in map[text] or {} do
-                local data = translationRegistry[inst]
-                if data and inst.Parent then
-                    data.translating = true
-                    inst.Text = out
-                    data.translating = false
+            pending += 1
+            task.spawn(function()
+                local out = translateUiText(text, code)
+                for _, inst in map[text] or {} do
+                    local data = translationRegistry[inst]
+                    if data and inst.Parent then
+                        data.translating = true
+                        inst.Text = out
+                        data.translating = false
+                    end
                 end
-            end
-            task.wait(0.012)
+                markDone()
+            end)
         end
+
+        local placeholders = {}
         for _, data in translationRegistry do
             if data.isPlaceholder and data.original and data.original ~= "" and data.inst and data.inst.Parent then
-                local out = translateUiText(data.original, code)
-                data.translating = true
-                data.inst.PlaceholderText = out
-                data.translating = false
-                task.wait(0.012)
+                placeholders[#placeholders + 1] = data
             end
+        end
+        for _, data in placeholders do
+            pending += 1
+            local original = data.original
+            local inst = data.inst
+            task.spawn(function()
+                local out = translateUiText(original, code)
+                if inst.Parent then
+                    data.translating = true
+                    inst.PlaceholderText = out
+                    data.translating = false
+                end
+                markDone()
+            end)
+        end
+
+        while done < pending and os.clock() < deadline do
+            task.wait(0.05)
         end
         translateBusy = false
         hubNotify("Translate", "NTMT UI → " .. translateLanguage)
@@ -6320,11 +6398,23 @@ function findPlayerGuiText(matchFn)
     if type(gethui) == "function" then
         xpcall(function() roots[#roots + 1] = gethui() end, noopErr)
     end
+    xpcall(function() roots[#roots + 1] = game:GetService("CoreGui") end, noopErr)
     for _, root in roots do
         if not root then continue end
         for _, d in root:GetDescendants() do
             if (d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox")) and type(d.Text) == "string" and d.Text ~= "" then
                 if matchFn(d.Text) and not isHubUiInstance(d) then return d end
+            end
+        end
+    end
+    local dialogueRoots = { "Dialogue", "Dialogues", "NPCDialogue", "SellDialogue" }
+    for _, name in dialogueRoots do
+        local folder = Services.Workspace:FindFirstChild(name)
+        if folder then
+            for _, d in folder:GetDescendants() do
+                if (d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox")) and type(d.Text) == "string" and d.Text ~= "" then
+                    if matchFn(d.Text) then return d end
+                end
             end
         end
     end
@@ -6373,36 +6463,47 @@ end
 function tryDoubleOrNothing()
     if not genv.ftgs_AutoDoubleOrNothing then return end
     local now = os.clock()
-    local lowerSell = function(t)
-        local lower = string.lower(t)
-        return lower:find("sell", 1, true) and (lower:find("sell:", 1, true) or lower:find("[sell", 1, true) or lower:find("sell [", 1, true))
+    if donPending and now - donLastClickAt > DON_PENDING_TIMEOUT then
+        donPending = false
     end
+    local lower = string.lower
     local hasCongrats = findPlayerGuiText(function(t)
-        return string.lower(t):find("congrats", 1, true) ~= nil
+        local s = lower(t)
+        return s:find("congrats", 1, true) or s:find("you won", 1, true) or s:find("winner", 1, true)
     end)
     if hasCongrats then
         if now - donLastSellAt < DON_ACTION_COOLDOWN then return end
         donLastSellAt = now
         donPending = false
-        local sellOpt = findPlayerGuiText(lowerSell)
+        local sellOpt = findPlayerGuiText(function(t)
+            local s = lower(t)
+            return s:find("sell", 1, true)
+        end)
         if sellOpt and clickGuiElement(sellOpt) then return end
         pressDialogueKey(Enum.KeyCode.One)
         safeNetCall(Net.NPCS and Net.NPCS.SellAll)
         return
     end
-    local doubleOpt = findPlayerGuiText(function(t)
-        return string.lower(t):find("double or nothing", 1, true) ~= nil
+    local lost = findPlayerGuiText(function(t)
+        local s = lower(t)
+        return s:find("lost", 1, true) or s:find("unlucky", 1, true) or s:find("better luck", 1, true)
     end)
-    if not doubleOpt then
-        if donPending and now - donLastClickAt > DON_PENDING_TIMEOUT then donPending = false end
+    if lost then
+        donPending = false
         return
     end
+    local doubleOpt = findPlayerGuiText(function(t)
+        return lower(t):find("double or nothing", 1, true) ~= nil
+    end)
+    if not doubleOpt then return end
     if donPending then return end
     if now - donLastClickAt < DON_ACTION_COOLDOWN then return end
     donPending = true
     donLastClickAt = now
     if clickGuiElement(doubleOpt) then return end
     pressDialogueKey(Enum.KeyCode.Four)
+    local donRemote = Net.NPCS and (Net.NPCS.DoubleOrNothing or Net.NPCS.Gamble or Net.NPCS.PlayDoubleOrNothing)
+    if donRemote then safeNetCall(donRemote) end
 end
 
 function tryExpand()
@@ -7469,7 +7570,7 @@ task.spawn(function()
     end
 end)
 
-print("[NTMT HUB v7.3] Loaded | " .. Executor)
+print("[NTMT HUB v1.1] Loaded | " .. Executor)
 
 pcall(function()
     game:GetService("StarterGui"):SetCore("SendNotification", {
