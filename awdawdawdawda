@@ -968,7 +968,7 @@ MOON_WEATHER_PHASES = {
     { offset = 450, name = "Sunset" },
     { offset = 480, name = "Night" },
 }
-MOON_WEATHER_SKIP = { Day = true, Sunset = true, Moon = true }
+MOON_WEATHER_SKIP = { Day = true, Sunset = true }
 MOON_WEATHER_SEQ = {
   [1] = "Moon",
   [2] = "Moon",
@@ -3219,6 +3219,7 @@ function getStealPrompt(fruit)
         if desc:IsA("ProximityPrompt") then
             local action = (desc.ActionText or ""):lower()
             if action:find("steal", 1, true) or desc.Name == "StealPrompt" then return desc end
+            if isNightTime() and (action:find("harvest", 1, true) or action:find("pick", 1, true)) then return desc end
         end
     end
     return nil
@@ -4381,6 +4382,13 @@ end
 
 function tryAutoSteal()
     if not autoStealOn() or stealBusy or isInventoryFull() or not isNightTime() then return end
+    initMapFolders()
+    cachedStealTargets = nil
+    lastStealTargetScan = 0
+    safeNetCall(Net.Garden and Net.Garden.RequestGardens)
+    local preview = collectAllStealTargets()
+    if #preview == 0 then return end
+
     stealBusy = true
     local sessionId = stealSessionId
     task.spawn(function()
@@ -4392,8 +4400,11 @@ function tryAutoSteal()
         movementBypass = true
         gardenActionLock = true
         local stolenTotal = 0
+        local didStealAny = false
 
         while autoStealOn() and sessionId == stealSessionId and not isInventoryFull() and isNightTime() do
+            cachedStealTargets = nil
+            lastStealTargetScan = 0
             local targets = collectAllStealTargets()
             if #targets == 0 then break end
 
@@ -4417,6 +4428,7 @@ function tryAutoSteal()
                     if owner and isOwnerInPlot(plot, owner) then break end
                     if stealFruit(fruit, uid, sessionId) then
                         stolenTotal += 1
+                        didStealAny = true
                         gotOne = true
                     end
                 end
@@ -4433,7 +4445,7 @@ function tryAutoSteal()
             end
         end
 
-        finishStealSession(sessionId, true)
+        finishStealSession(sessionId, didStealAny)
     end)
 end
 
@@ -4496,16 +4508,17 @@ function tryBuyPet()
     table.sort(candidates, function(a, b) return (a.price or 0) < (b.price or 0) end)
     local pick = candidates[1]
     local tameRemote = Net.Pets and Net.Pets.WildPetTame
-    task.spawn(function()
-        if pick.pos then tpInstant(pick.pos) end
-        for _ = 1, 28 do
-            if tameRemote then safeNetCall(tameRemote, pick.ref) end
+    if pick.pos then tpInstant(pick.pos) end
+    if tameRemote then
+        for _ = 1, 64 do
+            if not autoBuyPetOn() or not pick.ref or not pick.ref.Parent then break end
+            safeNetCall(tameRemote, pick.ref)
         end
-        local prompt = pick.ref:FindFirstChildWhichIsA("ProximityPrompt", true)
-        if prompt then
-            for _ = 1, 6 do fireProximityPromptFast(prompt) end
-        end
-    end)
+    end
+    local prompt = pick.ref and pick.ref:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt then
+        for _ = 1, 10 do fireProximityPromptFast(prompt) end
+    end
 end
 
 function hasIntruderOnPlot()
@@ -4526,9 +4539,18 @@ function isNightTime()
     local ws = Services.Workspace
     local rs = Services.ReplicatedStorage
     local phase = ws:GetAttribute("ActivePhase") or rs:GetAttribute("ActivePhase")
-    if type(phase) == "string" and string.find(string.lower(phase), "night", 1, true) then return true end
+    if type(phase) == "string" then
+        local lower = string.lower(phase)
+        if string.find(lower, "night", 1, true) or string.find(lower, "moon", 1, true) then return true end
+        if lower == "sunset" then return true end
+        if lower == "day" then return false end
+    end
     local weather = ws:GetAttribute("ActiveWeather") or rs:GetAttribute("ActiveWeather")
-    if type(weather) == "string" and string.find(string.lower(weather), "night", 1, true) then return true end
+    if type(weather) == "string" then
+        local lower = string.lower(weather)
+        if string.find(lower, "night", 1, true) or string.find(lower, "moon", 1, true) then return true end
+        if lower == "day" then return false end
+    end
     local clock = Services.Lighting.ClockTime
     return clock >= 18 or clock < 6
 end
@@ -4757,20 +4779,64 @@ function shopPredictDisplayName(name)
     return string.lower(tostring(name or ""))
 end
 
+function getShopPredictNow()
+    local ws = Services.Workspace
+    if ws and type(ws.GetServerTimeNow) == "function" then
+        local ok, t = xpcall(function() return ws:GetServerTimeNow() end, noopErr)
+        if ok and type(t) == "number" then return t end
+    end
+    return os.time()
+end
+
+function syncShopPredictAnchors()
+    if type(SHOP_PREDICT) ~= "table" then return end
+    initMapFolders()
+    local period = SHOP_PREDICT.period or 300
+    for _, spec in {
+        { folder = SeedShopFolder, key = "seedAnchor" },
+        { folder = GearShopFolder, key = "gearAnchor" },
+    } do
+        local folder = spec.folder
+        if not folder then continue end
+        for _, attr in { "RestockTime", "NextRestockTime", "StockEpoch", "ShopEpoch" } do
+            local rt = folder:GetAttribute(attr)
+            if type(rt) == "number" and rt > 1e9 then
+                local aligned = math.floor((rt - period) / period) * period
+                SHOP_PREDICT[spec.key] = aligned
+                break
+            end
+        end
+    end
+end
+
+function shopPredictSlotIndex(anchor, period, count, nowT)
+    anchor = anchor or 0
+    period = period or 300
+    count = math.max(1, count or 1)
+    nowT = nowT or getShopPredictNow()
+    local raw = math.floor((nowT - anchor) / period)
+    local idx = raw % count
+    if idx < 0 then idx += count end
+    return idx, raw
+end
+
 function evalShopPredictItem(item, anchor, period, count, nowT)
     if not item or type(item.q) ~= "table" then return { cur = nil, nxt = nil } end
-    count = count or #item.q
+    count = math.min(count or #item.q, #item.q)
     period = period or 300
     anchor = anchor or 0
-    nowT = nowT or os.time()
-    local idx = math.floor((nowT - anchor) / period)
+    nowT = nowT or getShopPredictNow()
+    local idx, rawIdx = shopPredictSlotIndex(anchor, period, count, nowT)
     local cur, nxt = nil, nil
-    if idx >= 0 and idx < count and (item.q[idx + 1] or 0) > 0 then
-        cur = { t = anchor + idx * period, q = item.q[idx + 1] }
+    local curSlot = idx + 1
+    if curSlot >= 1 and curSlot <= #item.q and (item.q[curSlot] or 0) > 0 then
+        cur = { t = anchor + rawIdx * period, q = item.q[curSlot] }
     end
-    for k = math.max(idx + 1, 0), count - 1 do
-        if (item.q[k + 1] or 0) > 0 then
-            nxt = { t = anchor + k * period, q = item.q[k + 1] }
+    for off = 1, count do
+        local slot = ((idx + off) % count) + 1
+        local qv = item.q[slot] or 0
+        if qv > 0 then
+            nxt = { t = anchor + (rawIdx + off) * period, q = qv }
             break
         end
     end
@@ -4778,20 +4844,25 @@ function evalShopPredictItem(item, anchor, period, count, nowT)
 end
 
 function buildShopPredictLine(item, anchor, period, count, nowT)
+    nowT = nowT or getShopPredictNow()
     local ev = evalShopPredictItem(item, anchor, period, count, nowT)
     local qty, eta = 0, nil
     if ev.nxt then
         qty = ev.nxt.q
         eta = math.max(0, ev.nxt.t - nowT)
+    elseif ev.cur then
+        qty = ev.cur.q
+        eta = 0
     end
     local etaStr = eta and formatEtaLong(eta) or "—"
     return string.format("%s | x%d | %s | %s", shopPredictDisplayName(item.name), qty, etaStr, formatCompactNumber(item.price or 0))
 end
 
 function buildSeedShopPredictText()
+    syncShopPredictAnchors()
     local sp = SHOP_PREDICT
     if not sp or type(sp.seeds) ~= "table" then return "Prediction unavailable" end
-    local nowT = os.time()
+    local nowT = getShopPredictNow()
     local lines = {}
     for _, item in ipairs(sp.seeds) do
         lines[#lines + 1] = buildShopPredictLine(item, sp.seedAnchor, sp.period, sp.count, nowT)
@@ -4800,9 +4871,10 @@ function buildSeedShopPredictText()
 end
 
 function buildGearShopPredictText()
+    syncShopPredictAnchors()
     local sp = SHOP_PREDICT
     if not sp or type(sp.gears) ~= "table" then return "Prediction unavailable" end
-    local nowT = os.time()
+    local nowT = getShopPredictNow()
     local lines = {}
     for _, item in ipairs(sp.gears) do
         lines[#lines + 1] = buildShopPredictLine(item, sp.gearAnchor, sp.period, sp.count, nowT)
@@ -5551,23 +5623,33 @@ function applyMovement()
     if hum.JumpPower ~= desiredJumpPower then hum.JumpPower = desiredJumpPower end
 end
 
-function applyMovementBypass(_dt)
+function applyMovementBypass(dt)
     if not genv.ftgs_BypassMovement then return end
-    if genv.ftgs_FakeLag or movementBypass or gardenActionLock or isCatchingPet or stealBusy or collectingMutation then return end
+    if genv.ftgs_FakeLag then return end
     local hum = getHumanoid()
     local hrp = getRoot()
     if not hum or not hrp then return end
     applyMovement()
-    if hum.PlatformStand then hum.PlatformStand = false end
+    if hum.PlatformStand and not stealBusy and not collectingMutation and not isCatchingPet then
+        hum.PlatformStand = false
+    end
     local dir = hum.MoveDirection
-    if dir.Magnitude <= 0.05 then return end
+    if dir.Magnitude <= 0.05 then
+        if not (stealBusy or gardenActionLock or collectingMutation or isCatchingPet) then
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end
+        return
+    end
     local flat = Vector3.new(dir.X, 0, dir.Z)
     if flat.Magnitude <= 0.01 then return end
     flat = flat.Unit
-    local speed = desiredWalkSpeed
+    local speed = math.max(desiredWalkSpeed, 16)
+    local step = speed * (dt or (1 / 60))
     local vy = hrp.AssemblyLinearVelocity.Y
     hrp.AssemblyLinearVelocity = Vector3.new(flat.X * speed, vy, flat.Z * speed)
     hrp.AssemblyAngularVelocity = Vector3.zero
+    hrp.CFrame = hrp.CFrame + flat * math.min(step, 2.5)
+    lastMovementBypassAt = os.clock()
 end
 
 function setupAntiKnockbackChar(char)
@@ -5822,6 +5904,7 @@ function isLikelyShopRestock(oldSnap, newSnap)
 end
 
 function onShopRestockDetected()
+    syncShopPredictAnchors()
     if webhookPetShopUrl == "" then return end
     if os.clock() - shopWebhookDebounce < 1.5 then return end
     shopWebhookDebounce = os.clock()
@@ -5842,6 +5925,7 @@ function setupShopRestockWatch()
     bindFolder(StockValuesRoot)
     lastShopRestockToken = readShopRestockToken()
     lastStockSnapshot = snapshotShopStock()
+    task.defer(syncShopPredictAnchors)
     task.spawn(function()
         while true do
             task.wait(1)
@@ -5943,10 +6027,10 @@ function scanDropPromptsInto(container, out, hrpPos)
     end
 end
 
-function rebuildDropPromptCache()
+function rebuildDropPromptCache(fullScan)
     dropPromptCache = {}
     local hrp = getRoot()
-    local hrpPos = hrp and hrp.Position
+    local hrpPos = fullScan and nil or (hrp and hrp.Position)
     local roots = {}
     local map = Services.Workspace:FindFirstChild("Map")
     if map then
@@ -5954,11 +6038,13 @@ function rebuildDropPromptCache()
             local folder = map:FindFirstChild(name)
             if folder then roots[#roots + 1] = folder end
         end
+        roots[#roots + 1] = map
     end
     for _, name in { "Drops", "ItemDrops" } do
         local folder = Services.Workspace:FindFirstChild(name)
         if folder then roots[#roots + 1] = folder end
     end
+    if Gardens then roots[#roots + 1] = Gardens end
     if OwnerPlot then roots[#roots + 1] = OwnerPlot end
     for _, root in roots do scanDropPromptsInto(root, dropPromptCache, hrpPos) end
     table.sort(dropPromptCache, function(a, b) return a.dist < b.dist end)
@@ -5968,15 +6054,35 @@ end
 function findNearestDropPrompt()
     local hrp = getRoot()
     if not hrp then return nil end
-    if os.clock() - lastDropScan > DROP_SCAN_INTERVAL then rebuildDropPromptCache() end
-    if #dropPromptCache == 0 then return nil end
-    local entry = dropPromptCache[1]
-    if not entry or not entry.prompt or not entry.prompt.Parent then
-        rebuildDropPromptCache()
-        entry = dropPromptCache[1]
+    if os.clock() - lastDropScan > DROP_SCAN_INTERVAL then rebuildDropPromptCache(true) end
+    if #dropPromptCache == 0 then
+        rebuildDropPromptCache(true)
     end
-    if not entry then return nil end
-    return { prompt = entry.prompt, part = entry.part }
+    if #dropPromptCache == 0 then return nil end
+    local hrpPos = hrp.Position
+    local best, bestDist = nil, math.huge
+    for _, entry in dropPromptCache do
+        if entry.prompt and entry.prompt.Parent and entry.part and entry.part.Parent then
+            local dist = (entry.part.Position - hrpPos).Magnitude
+            if dist < bestDist then
+                bestDist = dist
+                best = { prompt = entry.prompt, part = entry.part }
+            end
+        end
+    end
+    if not best then
+        rebuildDropPromptCache(true)
+        for _, entry in dropPromptCache do
+            if entry.prompt and entry.prompt.Parent and entry.part and entry.part.Parent then
+                local dist = (entry.part.Position - hrpPos).Magnitude
+                if dist < bestDist then
+                    bestDist = dist
+                    best = { prompt = entry.prompt, part = entry.part }
+                end
+            end
+        end
+    end
+    return best
 end
 
 function tryCollectDrops()
@@ -5988,11 +6094,14 @@ function tryCollectDrops()
         movementBypass = true
         gardenActionLock = true
         tpInstant(nearest.part.Position)
-        task.wait(0.04)
-        for _ = 1, 5 do
+        task.wait(0.02)
+        for _ = 1, 8 do
             if not autoCollectDropsOn() then break end
+            if nearest.part and nearest.part.Parent then
+                tpInstant(nearest.part.Position)
+            end
             fireProximityPromptFast(nearest.prompt)
-            task.wait(0.05)
+            task.wait(0.03)
         end
         movementBypass = false
         gardenActionLock = false
@@ -6017,14 +6126,21 @@ end
 
 function normalizeMoonDisplayName(name)
     if name == "Goldmoon" then return "Gold Moon" end
+    if name == "Bloodmoon" then return "Blood Moon" end
     return name or "Moon"
+end
+
+function moonSeqIndex(cyc)
+    local len = #MOON_WEATHER_SEQ
+    if len <= 0 then return 1 end
+    local offset = (cyc or 0) - MOON_WEATHER_START_CYCLE
+    return ((offset % len) + len) % len + 1
 end
 
 function getWeatherNameForCyclePhase(cyc, pi)
     if pi == 0 then return "Day" end
     if pi == 1 then return "Sunset" end
-    local idx = cyc - MOON_WEATHER_START_CYCLE + 1
-    return MOON_WEATHER_SEQ[idx] or "Moon"
+    return MOON_WEATHER_SEQ[moonSeqIndex(cyc)] or "Moon"
 end
 
 function weatherAtUnix(t)
@@ -6052,16 +6168,17 @@ function upcomingWeatherEvents(limit)
     local cur = weatherAtUnix(t)
     if not cur then return out end
     local cyc, pi = cur.cyc, cur.pi
-    for _ = 1, 400 do
+    for _ = 1, 800 do
         pi += 1
         if pi >= #MOON_WEATHER_PHASES then pi = 0; cyc += 1 end
-        local idx = cyc - MOON_WEATHER_START_CYCLE + 1
-        if idx < 1 or idx > #MOON_WEATHER_SEQ then break end
         local name = getWeatherNameForCyclePhase(cyc, pi)
         if not MOON_WEATHER_SKIP[name] then
             local startT = cyc * MOON_WEATHER_CLEN + MOON_WEATHER_PHASES[pi + 1].offset
-            out[#out + 1] = { name = normalizeMoonDisplayName(name), eta = math.max(0, startT - t) }
-            if #out >= limit then break end
+            local eta = math.max(0, startT - t)
+            if eta > 0 then
+                out[#out + 1] = { name = normalizeMoonDisplayName(name), eta = eta }
+                if #out >= limit then break end
+            end
         end
     end
     return out
@@ -6116,6 +6233,10 @@ function buildWeatherPredictText()
 end
 
 function buildWeatherLiveText()
+    local gameName, gameRemain = getWeatherInfo()
+    if type(gameName) == "string" and gameName ~= "" and gameName ~= "Unknown" then
+        return string.format("%s | %s", normalizeMoonDisplayName(gameName), formatEtaLong(gameRemain or 0))
+    end
     local cur = weatherAtUnix(os.time())
     if not cur then return "— | —" end
     local name = normalizeMoonDisplayName(cur.name or cur.phaseName or "?")
@@ -6623,7 +6744,7 @@ end)
 hubLoop(function()
     while true do
         if autoCollectMutationOn() or autoCollectDropsOn() then safeLoop(tryAutoCollectTick) end
-        task.wait(collectingMutation and 0.08 or 0.15)
+        task.wait(collectingMutation and 0.06 or 0.08)
     end
 end)
 
