@@ -18,7 +18,7 @@ end)
 -- KEY + DISCORD (edit here)
 ------------------------------------------------------------
 local HUB_LICENSE_KEY = "NTMT-HUB-KEY-FREE-TRIALS"
-local DISCORD_LINK = "https://discord.gg/VX4rBQyDKJ"
+local DISCORD_LINK = "https://discord.gg/BY3NrJMENc"
 local MADE_BY = "nguoitinhmuathu | @58g6"
 
 local genv = _G
